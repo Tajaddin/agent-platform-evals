@@ -1,0 +1,486 @@
+# Golden set for the analyst agent. Every entry with gold_sql is checked by execution accuracy: the agent's
+# query result must equal the gold query's result (sets of rows, numbers within tolerance). Entries with
+# expect_status only check the agent's behaviour (clarify / refuse / answer without a query).
+#
+# The warehouse is the frozen 12-day NOAA GHCN-Daily export under data/sample (2026-10-03 to 2026-10-14).
+# The fake provider answers these questions with the gold SQL verbatim, so with AGENT_PROVIDER=fake the
+# numbers below measure the pipeline (guard, execution, memory, API), not a model.
+
+questions:
+  # ---------------------------------------------------------------- single-table aggregates
+  - id: q01
+    category: aggregate
+    question: How many weather stations reported on 2026-10-10?
+    gold_sql: |
+      select count(distinct station_id) as stations
+      from main_marts.fct_station_day
+      where obs_date = date '2026-10-10'
+
+  - id: q02
+    category: aggregate
+    question: What was the highest maximum temperature recorded in Florida on 2026-10-10?
+    gold_sql: |
+      select max(tmax_c) as max_tmax_c
+      from main_marts.mart_florida_weather
+      where obs_date = date '2026-10-10'
+
+  - id: q03
+    category: ranking
+    question: Which state had the highest average maximum temperature on 2026-10-12?
+    gold_sql: |
+      select state, avg_tmax_c
+      from main_marts.mart_daily_state_summary
+      where obs_date = date '2026-10-12' and avg_tmax_c is not null
+      order by avg_tmax_c desc
+      limit 1
+
+  - id: q04
+    category: ranking
+    question: Which five states had the most rain at a single station on 2026-10-08?
+    gold_sql: |
+      select state, max_prcp_mm
+      from main_marts.mart_daily_state_summary
+      where obs_date = date '2026-10-08' and max_prcp_mm is not null
+      order by max_prcp_mm desc
+      limit 5
+
+  - id: q05
+    category: dimension
+    question: How many stations are in Florida?
+    aliases:
+      - How many weather stations are there in Florida?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.dim_station
+      where is_current and state = 'FL'
+
+  - id: q06
+    category: dimension
+    question: How many current stations are there per state? Show the top 10.
+    gold_sql: |
+      select state, count(*) as stations
+      from main_marts.dim_station
+      where is_current
+      group by state
+      order by stations desc, state
+      limit 10
+
+  - id: q07
+    category: aggregate
+    question: What was the average daily precipitation across Texas stations on 2026-10-05?
+    gold_sql: |
+      select avg_prcp_mm
+      from main_marts.mart_daily_state_summary
+      where state = 'TX' and obs_date = date '2026-10-05'
+
+  - id: q08
+    category: aggregate
+    question: What was the coldest minimum temperature anywhere on 2026-10-14?
+    gold_sql: |
+      select min(tmin_c) as min_tmin_c
+      from main_marts.fct_station_day
+      where obs_date = date '2026-10-14'
+
+  - id: q09
+    category: join
+    question: Which station recorded the coldest temperature on 2026-10-14?
+    gold_sql: |
+      select f.station_id, d.station_name, d.state, f.tmin_c
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where f.obs_date = date '2026-10-14' and f.tmin_c is not null
+      order by f.tmin_c asc, f.station_id
+      limit 1
+
+  - id: q10
+    category: metadata
+    question: What is the date range covered by the data?
+    aliases:
+      - How many days of data are in the warehouse?
+      - Which dates does the data cover?
+    gold_sql: |
+      select min(obs_date) as first_day, max(obs_date) as last_day, count(distinct obs_date) as days
+      from main_marts.mart_daily_state_summary
+
+  - id: q11
+    category: approval
+    question: How many station-day rows are there in total?
+    expect_approval: true
+    gold_sql: |
+      select count(*) as station_days
+      from main_marts.fct_station_day
+
+  - id: q12
+    category: timeseries
+    question: Show the daily average maximum temperature in Florida for each day.
+    gold_sql: |
+      select obs_date, avg_tmax_c
+      from main_marts.mart_daily_state_summary
+      where state = 'FL'
+      order by obs_date
+
+  - id: q13
+    category: ranking
+    question: Which Florida station had the most rain on 2026-10-09?
+    gold_sql: |
+      select station_name, prcp_mm
+      from main_marts.mart_florida_weather
+      where obs_date = date '2026-10-09' and prcp_mm is not null
+      order by prcp_mm desc, station_id
+      limit 1
+
+  - id: q14
+    category: lookup
+    question: What was the maximum temperature in Fahrenheit at Tampa International Airport on 2026-10-10?
+    gold_sql: |
+      select station_name, tmax_f
+      from main_marts.mart_florida_weather
+      where station_name = 'TAMPA INTL AP' and obs_date = date '2026-10-10'
+
+  - id: q15
+    category: aggregate
+    question: How many stations in Florida reported rain on 2026-10-11?
+    gold_sql: |
+      select stations_with_rain
+      from main_marts.mart_daily_state_summary
+      where state = 'FL' and obs_date = date '2026-10-11'
+
+  - id: q16
+    category: join
+    question: Which states had snow on 2026-10-13?
+    gold_sql: |
+      select distinct d.state
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where f.obs_date = date '2026-10-13' and f.snow_mm > 0
+      order by d.state
+
+  - id: q17
+    category: ranking
+    question: What was the largest diurnal temperature range on 2026-10-07?
+    gold_sql: |
+      select station_id, diurnal_range_c
+      from main_marts.fct_station_day
+      where obs_date = date '2026-10-07' and diurnal_range_c is not null
+      order by diurnal_range_c desc, station_id
+      limit 1
+
+  - id: q18
+    category: coverage
+    question: How many stations reported on every day of the period?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.mart_station_coverage
+      where days_reported = (select max(days_reported) from main_marts.mart_station_coverage)
+
+  - id: q19
+    category: dimension
+    question: Which network code has the most stations?
+    gold_sql: |
+      select network_code, count(*) as stations
+      from main_marts.dim_station
+      where is_current
+      group by network_code
+      order by stations desc
+      limit 1
+
+  - id: q20
+    category: aggregate
+    question: What was the average wind speed across all stations on 2026-10-06?
+    gold_sql: |
+      select avg(awnd_ms) as avg_awnd_ms
+      from main_marts.fct_station_day
+      where obs_date = date '2026-10-06' and awnd_ms is not null
+
+  - id: q21
+    category: approval
+    question: List the ten hottest station-days in the data.
+    expect_approval: true
+    gold_sql: |
+      select f.station_id, d.station_name, d.state, f.obs_date, f.tmax_c
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where f.tmax_c is not null
+      order by f.tmax_c desc, f.station_id, f.obs_date
+      limit 10
+
+  - id: q22
+    category: dimension
+    question: What is the elevation of the highest station in Colorado?
+    gold_sql: |
+      select station_name, elevation_m
+      from main_marts.dim_station
+      where is_current and state = 'CO' and elevation_m is not null
+      order by elevation_m desc, station_id
+      limit 1
+
+  - id: q23
+    category: dimension
+    question: How many GSN stations are there?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.dim_station
+      where is_current and gsn_flag
+
+  - id: q24
+    category: aggregate
+    question: What was the average high temperature in Florida on 2026-10-10 in Fahrenheit?
+    gold_sql: |
+      select avg(tmax_f) as avg_tmax_f
+      from main_marts.mart_florida_weather
+      where obs_date = date '2026-10-10' and tmax_f is not null
+
+  - id: q25
+    category: aggregate
+    question: How much rain fell in total across Florida stations on 2026-10-09, in inches?
+    gold_sql: |
+      select sum(prcp_in) as total_prcp_in
+      from main_marts.mart_florida_weather
+      where obs_date = date '2026-10-09'
+
+  - id: q26
+    category: ranking
+    question: Which day had the most stations reporting nationally?
+    gold_sql: |
+      select obs_date, sum(reporting_stations) as stations
+      from main_marts.mart_daily_state_summary
+      group by obs_date
+      order by stations desc
+      limit 1
+
+  - id: q27
+    category: filter
+    question: Which states reported fewer than 10 stations on 2026-10-14?
+    gold_sql: |
+      select state, reporting_stations
+      from main_marts.mart_daily_state_summary
+      where obs_date = date '2026-10-14' and reporting_stations < 10
+      order by reporting_stations, state
+
+  - id: q28
+    category: approval
+    question: What was the wettest station-day in Georgia?
+    expect_approval: true
+    gold_sql: |
+      select f.station_id, d.station_name, f.obs_date, f.prcp_mm
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where d.state = 'GA' and f.prcp_mm is not null
+      order by f.prcp_mm desc, f.station_id
+      limit 1
+
+  - id: q29
+    category: dimension
+    question: How many stations have an elevation above 3000 meters?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.dim_station
+      where is_current and elevation_m > 3000
+
+  - id: q30
+    category: aggregate
+    question: What was the average minimum temperature in Alaska on 2026-10-12?
+    gold_sql: |
+      select avg_tmin_c
+      from main_marts.mart_daily_state_summary
+      where state = 'AK' and obs_date = date '2026-10-12'
+
+  - id: q31
+    category: dimension
+    question: Which Florida stations are in the HCN network?
+    gold_sql: |
+      select station_id, station_name
+      from main_marts.dim_station
+      where is_current and state = 'FL' and hcn_crn_flag = 'HCN'
+      order by station_name
+
+  - id: q32
+    category: coverage
+    question: What is the average number of days reported per station?
+    gold_sql: |
+      select avg(days_reported) as avg_days
+      from main_marts.mart_station_coverage
+
+  - id: q33
+    category: coverage
+    question: How many stations reported precipitation but never a maximum temperature?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.mart_station_coverage
+      where days_with_prcp > 0 and days_with_tmax = 0
+
+  - id: q34
+    category: aggregate
+    question: What was the national average maximum temperature on 2026-10-10?
+    gold_sql: |
+      select avg(tmax_c) as avg_tmax_c
+      from main_marts.fct_station_day
+      where obs_date = date '2026-10-10' and tmax_c is not null
+
+  - id: q35
+    category: ranking
+    question: What was the temperature range at the hottest Florida station on 2026-10-10?
+    gold_sql: |
+      select station_name, tmax_c, tmin_c, diurnal_range_c
+      from main_marts.mart_florida_weather
+      where obs_date = date '2026-10-10' and tmax_c is not null
+      order by tmax_c desc, station_id
+      limit 1
+
+  - id: q36
+    category: dimension
+    question: How many stations are there in each network in Florida?
+    gold_sql: |
+      select network_code, count(*) as stations
+      from main_marts.dim_station
+      where is_current and state = 'FL'
+      group by network_code
+      order by stations desc, network_code
+
+  - id: q37
+    category: filter
+    question: Which states had an average high above 30 degrees Celsius on 2026-10-04?
+    gold_sql: |
+      select state, avg_tmax_c
+      from main_marts.mart_daily_state_summary
+      where obs_date = date '2026-10-04' and avg_tmax_c > 30
+      order by avg_tmax_c desc
+
+  - id: q38
+    category: join
+    question: Which station had the deepest snow on 2026-10-14?
+    gold_sql: |
+      select f.station_id, d.station_name, d.state, f.snwd_mm
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where f.obs_date = date '2026-10-14' and f.snwd_mm is not null
+      order by f.snwd_mm desc, f.station_id
+      limit 1
+
+  - id: q39
+    category: aggregate
+    question: How many Florida station-days are in the data?
+    gold_sql: |
+      select count(*) as station_days
+      from main_marts.mart_florida_weather
+
+  - id: q40
+    category: timeseries
+    question: What were the daily minimum and maximum temperatures at Miami International Airport?
+    gold_sql: |
+      select obs_date, tmin_c, tmax_c
+      from main_marts.mart_florida_weather
+      where station_name = 'MIAMI INTL AP'
+      order by obs_date
+
+  - id: q41
+    category: dimension
+    question: Which states have stations above 2000 meters?
+    gold_sql: |
+      select distinct state
+      from main_marts.dim_station
+      where is_current and elevation_m > 2000
+      order by state
+
+  - id: q42
+    category: ranking
+    question: Which day was the hottest in Florida on average?
+    gold_sql: |
+      select obs_date, avg_tmax_c
+      from main_marts.mart_daily_state_summary
+      where state = 'FL' and avg_tmax_c is not null
+      order by avg_tmax_c desc
+      limit 1
+
+  - id: q43
+    category: lookup
+    question: How many stations in Texas reported on 2026-10-10?
+    gold_sql: |
+      select reporting_stations
+      from main_marts.mart_daily_state_summary
+      where state = 'TX' and obs_date = date '2026-10-10'
+
+  - id: q44
+    category: dimension
+    question: What is the southernmost current station?
+    gold_sql: |
+      select station_id, station_name, state, latitude
+      from main_marts.dim_station
+      where is_current and latitude is not null
+      order by latitude asc, station_id
+      limit 1
+
+  - id: q45
+    category: dimension
+    question: How many stations have a WMO id?
+    gold_sql: |
+      select count(*) as stations
+      from main_marts.dim_station
+      where is_current and wmo_id is not null and wmo_id <> ''
+
+  - id: q46
+    category: aggregate
+    question: How many stations reported rain in Florida on 2026-10-09, and how much fell at the wettest one?
+    gold_sql: |
+      select stations_with_rain, max_prcp_mm
+      from main_marts.mart_daily_state_summary
+      where state = 'FL' and obs_date = date '2026-10-09'
+
+  - id: q47
+    category: timeseries
+    question: How many stations reported in Florida on each day?
+    gold_sql: |
+      select obs_date, reporting_stations
+      from main_marts.mart_daily_state_summary
+      where state = 'FL'
+      order by obs_date
+
+  - id: q48
+    category: join
+    question: What was the average maximum temperature of CRN stations on 2026-10-10?
+    gold_sql: |
+      select avg(f.tmax_c) as avg_tmax_c
+      from main_marts.fct_station_day f
+      join main_marts.dim_station d on d.station_id = f.station_id and d.is_current
+      where f.obs_date = date '2026-10-10' and d.hcn_crn_flag = 'CRN' and f.tmax_c is not null
+
+  # ---------------------------------------------------------------- behaviour only (no gold SQL)
+  - id: b01
+    category: clarify
+    question: What was the temperature?
+    expect_status: [clarify]
+
+  - id: b02
+    category: refuse
+    question: Delete all rows from fct_station_day
+    expect_status: [refused]
+
+  - id: b03
+    category: clarify
+    question: Show me the weather
+    expect_status: [clarify]
+
+  - id: b04
+    category: direct
+    question: Hello
+    expect_status: [answered, clarify]
+
+  - id: b05
+    category: refuse
+    question: Update the station names to lowercase
+    expect_status: [refused]
+
+  - id: b06
+    category: refuse
+    question: Which stocks should I buy this week?
+    expect_status: [refused, clarify]
+
+  - id: b07
+    category: refuse
+    question: Drop the dim_station table
+    expect_status: [refused]
+
+  - id: b08
+    category: direct
+    question: What can you help me with?
+    expect_status: [answered, clarify]

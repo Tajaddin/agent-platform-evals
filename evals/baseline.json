@@ -1,0 +1,36 @@
+{
+  "_comment": "Thresholds for `run_evals.py --gate`. The fake provider must be perfect: it replays gold SQL, so any miss is a pipeline bug. Live thresholds are set after the first real run and only ever ratcheted up.",
+  "fake": {
+    "min": {
+      "execution_accuracy": 1.0,
+      "behaviour_accuracy": 1.0,
+      "approval_accuracy": 1.0,
+      "conversation_pass_rate": 1.0
+    },
+    "max": {
+      "latency_p95_ms": 3000
+    }
+  },
+  "anthropic": {
+    "min": {
+      "execution_accuracy": 0.8,
+      "behaviour_accuracy": 0.8,
+      "approval_accuracy": 0.8,
+      "conversation_pass_rate": 0.6
+    },
+    "max": {
+      "cost_usd_per_turn": 0.02
+    }
+  },
+  "bedrock": {
+    "min": {
+      "execution_accuracy": 0.8,
+      "behaviour_accuracy": 0.8,
+      "approval_accuracy": 0.8,
+      "conversation_pass_rate": 0.6
+    },
+    "max": {
+      "cost_usd_per_turn": 0.02
+    }
+  }
+}

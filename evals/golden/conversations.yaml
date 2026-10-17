@@ -1,0 +1,90 @@
+# Multi-turn regression set. Each conversation runs on one thread; later turns depend on memory of earlier
+# ones (requires_history). A turn with gold_sql is scored by execution accuracy, a turn with expect_status by
+# behaviour. approve: true means the runner answers the human-in-the-loop interrupt with "yes".
+
+conversations:
+  - id: c01
+    name: follow-up flips the ranking
+    turns:
+      - message: Which state had the highest average maximum temperature on 2026-10-12?
+        gold_sql: |
+          select state, avg_tmax_c
+          from main_marts.mart_daily_state_summary
+          where obs_date = date '2026-10-12' and avg_tmax_c is not null
+          order by avg_tmax_c desc
+          limit 1
+      - message: And the lowest?
+        requires_history: true
+        gold_sql: |
+          select state, avg_tmax_c
+          from main_marts.mart_daily_state_summary
+          where obs_date = date '2026-10-12' and avg_tmax_c is not null
+          order by avg_tmax_c asc
+          limit 1
+
+  - id: c02
+    name: follow-up narrows the entity
+    turns:
+      - message: How many stations are in Florida?
+        gold_sql: |
+          select count(*) as stations
+          from main_marts.dim_station
+          where is_current and state = 'FL'
+      - message: How many of them reported on 2026-10-10?
+        requires_history: true
+        gold_sql: |
+          select reporting_stations
+          from main_marts.mart_daily_state_summary
+          where state = 'FL' and obs_date = date '2026-10-10'
+
+  - id: c03
+    name: same question, different state
+    turns:
+      - message: What was the average high temperature in Texas on 2026-10-05?
+        gold_sql: |
+          select avg_tmax_c
+          from main_marts.mart_daily_state_summary
+          where state = 'TX' and obs_date = date '2026-10-05'
+      - message: Same question for Georgia
+        requires_history: true
+        gold_sql: |
+          select avg_tmax_c
+          from main_marts.mart_daily_state_summary
+          where state = 'GA' and obs_date = date '2026-10-05'
+
+  - id: c04
+    name: approval then follow-up
+    turns:
+      - message: How many station-day rows are there in total?
+        expect_approval: true
+        approve: true
+        gold_sql: |
+          select count(*) as station_days
+          from main_marts.fct_station_day
+      - message: And how many distinct stations is that?
+        requires_history: true
+        expect_approval: true
+        approve: true
+        gold_sql: |
+          select count(distinct station_id) as stations
+          from main_marts.fct_station_day
+
+  - id: c05
+    name: clarification then a precise question
+    turns:
+      - message: Show me the weather
+        expect_status: [clarify]
+      - message: I mean the average high in Florida on 2026-10-10
+        requires_history: true
+        gold_sql: |
+          select avg_tmax_c
+          from main_marts.mart_daily_state_summary
+          where state = 'FL' and obs_date = date '2026-10-10'
+
+  - id: c06
+    name: approval declined
+    turns:
+      - message: List the ten hottest station-days in the data.
+        expect_approval: true
+        approve: false
+        expect_status: [refused]
