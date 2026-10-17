@@ -1,0 +1,12 @@
+# Alerts are routed to one receiver. Locally they are visible in the Alertmanager UI (http://localhost:9093);
+# to page a channel, add slack_configs / webhook_configs under the receiver and mount the webhook URL as a
+# file (api_url_file), never inline in this committed config.
+route:
+  receiver: default
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: default

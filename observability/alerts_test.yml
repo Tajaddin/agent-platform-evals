@@ -1,0 +1,113 @@
+# promtool unit tests: `promtool test rules observability/alerts_test.yml`
+rule_files:
+  - alert_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: AgentDown fires after two minutes without a scrape
+    input_series:
+      - series: 'up{job="analyst-agent", instance="api:8000"}'
+        values: "1 1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AgentDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: AgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: analyst-agent
+              instance: api:8000
+            exp_annotations:
+              summary: "analyst-agent is not being scraped"
+              description: "Prometheus has not been able to scrape the API for 2 minutes."
+
+  - interval: 1m
+    name: AgentHighErrorRate fires at 10% errors and stays quiet at 1%
+    input_series:
+      # 90 answered + 10 error per minute -> 10% error share
+      - series: 'agent_requests_total{status="answered"}'
+        values: "0+90x20"
+      - series: 'agent_requests_total{status="error"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AgentHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "more than 5% of chat turns end in error"
+              description: "Error share over 5 minutes is 10%."
+
+  - interval: 1m
+    name: AgentHighErrorRate stays quiet at 1% errors
+    input_series:
+      - series: 'agent_requests_total{status="answered"}'
+        values: "0+99x20"
+      - series: 'agent_requests_total{status="error"}'
+        values: "0+1x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AgentHighErrorRate
+        exp_alerts: []
+
+  - interval: 1m
+    name: AgentHighLatencyP95 fires when most requests take more than 20 s
+    input_series:
+      # histogram with 10 requests/min, 9 of them above 20 s
+      - series: 'agent_request_seconds_bucket{le="10"}'
+        values: "0+1x20"
+      - series: 'agent_request_seconds_bucket{le="20"}'
+        values: "0+1x20"
+      - series: 'agent_request_seconds_bucket{le="40"}'
+        values: "0+10x20"
+      - series: 'agent_request_seconds_bucket{le="+Inf"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: AgentHighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "p95 chat latency above 20 s"
+              description: "p95 over 5 minutes is 38.89s."
+
+  - interval: 1m
+    name: AgentCostBurn fires when an hour costs more than a dollar
+    input_series:
+      - series: "agent_cost_usd_total"
+        values: "0+0.05x70"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AgentCostBurn
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: AgentCostBurn
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend above $1 in the last hour"
+              description: "Estimated spend in the last hour: $3.00."
+
+  - interval: 1m
+    name: AgentGuardRejectionSpike fires at 50% rejections
+    input_series:
+      - series: 'agent_guard_decisions_total{decision="allowed"}'
+        values: "0+5x30"
+      - series: 'agent_guard_decisions_total{decision="rejected"}'
+        values: "0+5x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AgentGuardRejectionSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "the SQL guard is rejecting more than 30% of generated queries"
+              description: "Either the model regressed or the schema changed under it. Rejection share: 50%."

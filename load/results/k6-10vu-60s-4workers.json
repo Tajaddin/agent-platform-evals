@@ -1,0 +1,15 @@
+{
+  "vus": 10,
+  "duration": "60s",
+  "requests": 2337,
+  "requests_per_second": 38.716061039058765,
+  "failed_rate": 0,
+  "http_p50_ms": 145.601185,
+  "http_p95_ms": 247.18482219999984,
+  "http_p99_ms": null,
+  "agent_turn_p50_ms": 143.7,
+  "agent_turn_p95_ms": 243.53999999999968,
+  "answered": 2190,
+  "not_answered": 147,
+  "thresholds_passed": true
+}

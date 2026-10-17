@@ -1,0 +1,54 @@
+# Alerts for the analyst agent. Each rule has a unit test in alerts_test.yml (run with `make alerts-test`),
+# so a rule that can never fire, or fires on healthy traffic, fails CI.
+groups:
+  - name: analyst-agent
+    rules:
+      - alert: AgentDown
+        expr: up{job="analyst-agent"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "analyst-agent is not being scraped"
+          description: "Prometheus has not been able to scrape the API for 2 minutes."
+
+      - alert: AgentHighErrorRate
+        expr: |
+          sum(rate(agent_requests_total{status="error"}[5m]))
+            / sum(rate(agent_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "more than 5% of chat turns end in error"
+          description: "Error share over 5 minutes is {{ $value | humanizePercentage }}."
+
+      - alert: AgentHighLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum(rate(agent_request_seconds_bucket[5m])) by (le)) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 chat latency above 20 s"
+          description: "p95 over 5 minutes is {{ $value | humanizeDuration }}."
+
+      - alert: AgentCostBurn
+        expr: increase(agent_cost_usd_total[1h]) > 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM spend above $1 in the last hour"
+          description: "Estimated spend in the last hour: ${{ $value | printf \"%.2f\" }}."
+
+      - alert: AgentGuardRejectionSpike
+        expr: |
+          sum(rate(agent_guard_decisions_total{decision="rejected"}[15m]))
+            / sum(rate(agent_guard_decisions_total[15m])) > 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the SQL guard is rejecting more than 30% of generated queries"
+          description: "Either the model regressed or the schema changed under it. Rejection share: {{ $value | humanizePercentage }}."
