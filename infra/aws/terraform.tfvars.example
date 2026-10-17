@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+region            = "us-east-1"
+github_repository = "Tajaddin/agent-platform-evals"
+api_keys          = ["generate-a-long-random-string"]
+# allowed_cidrs   = ["203.0.113.4/32"]   # restrict the load balancer to your IP while demoing
+# bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"

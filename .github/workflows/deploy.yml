@@ -1,0 +1,49 @@
+name: deploy
+
+# Builds the image, pushes it to ECR and rolls the ECS service. Manual only: it needs the AWS OIDC role from
+# infra/aws (output `github_actions_role_arn`) stored as the AWS_ROLE_ARN repository secret, and it costs money
+# while the stack is up. Tear the stack down with `make teardown` when the demo is over.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: analyst-agent
+  ECS_CLUSTER: analyst-agent
+  ECS_SERVICE: analyst-agent
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: roll the service onto the new image
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment >/dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+      - name: smoke test through the load balancer
+        run: |
+          URL=$(aws elbv2 describe-load-balancers --names analyst-agent --query 'LoadBalancers[0].DNSName' --output text)
+          curl -fsS "http://$URL/healthz"
+          curl -fsS "http://$URL/readyz"

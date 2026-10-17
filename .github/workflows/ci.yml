@@ -1,0 +1,171 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live_evals:
+        description: "Also run the golden set against the Anthropic API (costs money)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.10.4"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check src evals tests scripts
+      - run: uv run ruff format --check src evals tests scripts
+      - run: uv run mypy
+
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+          POSTGRES_DB: agent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agent" --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-extras
+      - run: uv run python scripts/build_demo_warehouse.py
+      - name: unit, integration and Postgres memory tests
+        env:
+          DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
+        run: uv run pytest -m "not live" --cov --cov-report=xml --cov-report=term --cov-fail-under=85
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  evals:
+    name: eval gate (fake provider)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-extras
+      - run: uv run python scripts/build_demo_warehouse.py
+      - run: uv run python evals/run_evals.py --provider fake --gate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-fake
+          path: evals/results/latest-fake.*
+
+  evals-live:
+    name: eval gate (Anthropic API)
+    # Only when asked for, and only when the repository has the secret. Each run is roughly 240 Haiku calls.
+    if: github.event_name == 'workflow_dispatch' && inputs.live_evals
+    runs-on: ubuntu-24.04
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --all-extras
+      - run: uv run python scripts/build_demo_warehouse.py
+      - name: run golden set against the live model
+        if: env.ANTHROPIC_API_KEY != ''
+        run: uv run python evals/run_evals.py --provider anthropic --judge --gate
+      - name: no key configured
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "ANTHROPIC_API_KEY secret is not set; skipping live evals" && exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-anthropic
+          path: evals/results/latest-anthropic.*
+
+  alerts:
+    name: alert rule unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker run --rm -v "$PWD/observability:/w" -w /w --entrypoint promtool prom/prometheus:v3.5.0 check rules alert_rules.yml
+          docker run --rm -v "$PWD/observability:/w" -w /w --entrypoint promtool prom/prometheus:v3.5.0 test rules alerts_test.yml
+
+  gitleaks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: image build and smoke test
+    runs-on: ubuntu-24.04
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: analyst-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: run the image and ask it a question
+        run: |
+          docker run -d --name agent -p 8000:8000 -e AGENT_API_KEYS='["ci-key"]' analyst-agent:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:8000/healthz && break || sleep 1; done
+          curl -fsS http://localhost:8000/readyz
+          curl -fsS -X POST http://localhost:8000/v1/chat -H 'X-API-Key: ci-key' -H 'Content-Type: application/json' \
+            -d '{"thread_id":"ci","message":"How many stations are in Florida?"}' | tee /tmp/resp.json
+          grep -q '"status":"answered"' /tmp/resp.json
+          grep -q '2338' /tmp/resp.json
+          docker logs agent | tail -5
+          docker rm -f agent
+
+  terraform:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - run: terraform -chdir=infra/aws fmt -check -recursive
+      - run: terraform -chdir=infra/aws init -backend=false
+      - run: terraform -chdir=infra/aws validate
