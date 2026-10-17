@@ -62,7 +62,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
         run: uv run pytest -m "not live" --cov --cov-report=xml --cov-report=term --cov-fail-under=85
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.xml
@@ -80,7 +80,7 @@ jobs:
       - run: uv sync --frozen --all-extras
       - run: uv run python scripts/build_demo_warehouse.py
       - run: uv run python evals/run_evals.py --provider fake --gate
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: eval-results-fake
           path: evals/results/latest-fake.*
@@ -107,7 +107,7 @@ jobs:
       - name: no key configured
         if: env.ANTHROPIC_API_KEY == ''
         run: echo "ANTHROPIC_API_KEY secret is not set; skipping live evals" && exit 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: eval-results-anthropic
