@@ -2,7 +2,7 @@
 # Two stages: build the virtualenv and the demo warehouse with uv, then copy them into a slim runtime image
 # that runs as a non-root user.
 
-FROM python:3.12-slim AS build
+FROM python:3.14-slim AS build
 COPY --from=ghcr.io/astral-sh/uv:0.10.4 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/app/.venv UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
@@ -19,7 +19,7 @@ COPY data/sample ./data/sample
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev \
  && /app/.venv/bin/python scripts/build_demo_warehouse.py --out /app/data/demo_warehouse.duckdb
 
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 RUN groupadd -r -g 10001 agent && useradd -r -u 10001 -g agent -d /app agent
 WORKDIR /app
 COPY --from=build --chown=agent:agent /app /app
