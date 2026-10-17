@@ -1,0 +1,37 @@
+# environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# generated data: rebuild with scripts/build_demo_warehouse.py (samples under data/sample are committed)
+data/*.duckdb
+data/*.duckdb.wal
+
+# eval and load-test scratch output (summaries are committed under evals/results and load/results)
+evals/results/*.raw.json
+load/results/*.raw.json
+
+# terraform
+infra/**/.terraform/
+infra/**/*.tfstate*
+infra/**/*.tfvars
+!infra/**/*.tfvars.example
+infra/**/.terraform.lock.hcl
+
+# editors
+.idea/
+.vscode/
+*.swp
+
+# only the latest eval summaries are committed
+evals/results/*
+!evals/results/latest-*

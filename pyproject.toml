@@ -1,0 +1,93 @@
+[project]
+name = "analyst-agent"
+version = "0.1.0"
+description = "Analyst assistant agent over a SQL warehouse: LangGraph supervisor, guarded text-to-SQL, traced and evaluated, CI-gated."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Tajaddin Gafarov", email = "gafarovtajaddin@gmail.com" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "langgraph>=1.2,<2",
+    "langchain-core>=1.6,<2",
+    "langchain-anthropic>=1.7,<2",
+    "langchain-aws>=1.9,<2",
+    "langgraph-checkpoint-postgres>=3.2,<4",
+    "psycopg[binary,pool]>=3.3,<4",
+    "fastapi>=0.143,<1",
+    "uvicorn[standard]>=0.35,<1",
+    "sse-starlette>=3.5,<4",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+    "duckdb>=1.5,<2",
+    "sqlglot>=27,<30",
+    "tenacity>=9.2,<10",
+    "slowapi>=0.1.10,<1",
+    "prometheus-client>=0.22,<1",
+    "structlog>=25.4,<26",
+    "opentelemetry-sdk>=1.36,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.36,<2",
+    "opentelemetry-instrumentation-fastapi>=0.57b0,<1",
+    "httpx>=0.28,<1",
+    "pyyaml>=6.0,<7",
+    "typer>=0.17,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "pytest-cov>=6.2,<7",
+    "ruff>=0.13,<1",
+    "mypy>=1.17,<2",
+    "types-PyYAML>=6.0",
+    "pyarrow>=21,<23",
+]
+
+[project.scripts]
+analyst-agent = "analyst_agent.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/analyst_agent"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests", "evals", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "S", "PL", "RUF"]
+ignore = ["S101", "PLR2004", "S608", "PLR0913", "PLR0912", "PLR0915", "PLR0917"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "E501", "PLC0415", "RUF012"]
+"evals/**" = ["S", "PLR", "E501", "PLC0415"]
+"scripts/**" = ["S", "PLR", "E501"]
+"src/analyst_agent/cli.py" = ["PLC0415"]  # lazy imports keep --help fast
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["analyst_agent"]
+mypy_path = "src"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider --strict-markers"
+pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "postgres: needs a Postgres at DATABASE_URL (service container in CI)",
+    "live: calls a paid LLM provider (needs ANTHROPIC_API_KEY)",
+]
+
+[tool.coverage.run]
+source = ["analyst_agent"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
