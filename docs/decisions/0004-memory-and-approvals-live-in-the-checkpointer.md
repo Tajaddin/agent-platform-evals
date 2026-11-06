@@ -11,7 +11,8 @@ second replica loses them.
 ## Decision
 
 Thread state is the graph state: `history` (append-only, reducer) plus the current turn's fields, keyed by
-`thread_id` through the checkpointer. Locally and in tests that is `MemorySaver`; when
+`thread_id` through the checkpointer. Through the API the key is `<hash of the API key>/<thread_id>`, so
+thread ids are a per-key namespace and one key cannot reach another key's history or pending approval. Locally and in tests that is `MemorySaver`; when
 `AGENT_DATABASE_URL` is set it is `PostgresSaver` on a psycopg connection pool (`saver.setup()` creates its
 tables on first start). Each turn starts with `new_turn_input()`, which resets the per-turn fields and
 leaves `history` to the reducer; per-turn `usage` is summed explicitly in the nodes rather than through a

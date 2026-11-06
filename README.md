@@ -130,6 +130,9 @@ API keys are all settings (`src/analyst_agent/config.py`, `AGENT_*` variables).
 | `GET /metrics` | Prometheus exposition |
 
 Authentication is `X-API-Key` (any of `AGENT_API_KEYS`; an empty list means open, for local use only).
+Threads belong to the key that created them: the checkpoint key is a hash of the API key plus the client's
+`thread_id`, so the same `thread_id` under two keys is two threads, and no key can read, continue or approve
+another key's thread.
 The chat endpoints are rate limited per key (`AGENT_RATE_LIMIT`, default 30/minute); probes are not.
 Statuses: `answered`, `clarify`, `refused`, `approval_required`, `error`.
 
