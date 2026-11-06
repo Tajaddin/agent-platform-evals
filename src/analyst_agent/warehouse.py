@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-from analyst_agent.guard import GuardOutcome, check_sql, estimated_rows_from_explain, has_date_filter
+from analyst_agent.guard import (
+    GuardOutcome,
+    PlanEstimate,
+    check_sql,
+    date_bounded_references,
+    is_date_column,
+    plan_estimate,
+)
 from analyst_agent.schemas import GuardDecision, QueryResult
 
 
@@ -118,18 +127,44 @@ class Warehouse:
         return "\n".join(lines)
 
     def guard(self, sql: str, approval_row_threshold: int) -> GuardDecision:
+        """Allow or reject the SQL, and decide whether it needs a human's approval.
+
+        Approval is needed when a pairwise join (no equality condition) would compare more row pairs than
+        the threshold, or when the estimated scan exceeds the threshold and some reference to a table larger
+        than the threshold lacks a real date range: a constant bound on a date column that the optimiser
+        kept as a filter on that table's scan.
+        """
         outcome: GuardOutcome = check_sql(sql, self.allowed_schemas, self.allowed_tables(), self.row_limit)
         if not outcome.allowed:
             return GuardDecision(allowed=False, sql=outcome.sql, reason=outcome.reason)
-        # EXPLAIN alone under-reports (a bare count(*) becomes a statistics lookup), so the scan estimate
-        # is the larger of the plan's cardinality and the size of the tables the query touches.
-        estimated = max(self._estimate_rows(outcome.sql), self._table_rows(outcome.tables))
-        needs_approval = estimated > approval_row_threshold and not has_date_filter(outcome.sql)
-        reason = (
-            f"estimated scan of {estimated:,} rows with no date filter; needs approval"
-            if needs_approval
-            else f"ok; estimated scan {estimated:,} rows"
+        sizes = {f"{t.schema}.{t.name}": t.row_count for t in self.tables()}
+        dates = {
+            f"{t.schema}.{t.name}": {c.name.lower() for c in t.columns if is_date_column(c.name)}
+            for t in self.tables()
+        }
+        refs = date_bounded_references(outcome.sql, self.allowed_schemas, self.allowed_tables(), dates)
+        plan = self._plan(outcome.sql)
+        # EXPLAIN alone under-reports (a bare count(*) becomes a statistics lookup), so the scan estimate also
+        # counts every reference at its table's full size; a self-join counts twice.
+        estimated = max(plan.rows, plan.pairs, sum(sizes.get(t, 0) for t, _ in refs))
+        large = Counter(t for t, _ in refs if sizes.get(t, 0) > approval_row_threshold)
+        unbounded = sorted(
+            {t for t, bounded in refs if t in large and not bounded}
+            | {t for t, n in large.items() if plan.filtered_scans(t, dates.get(t, set())) < n}
         )
+        date_bounded = not unbounded and any(bounded for _, bounded in refs)
+        if plan.pairs > approval_row_threshold:
+            needs_approval = True
+            reason = f"a join without an equality condition compares about {plan.pairs:,} row pairs"
+        elif estimated > approval_row_threshold and not date_bounded:
+            needs_approval = True
+            on = ", ".join(unbounded) or "any table"
+            reason = f"estimated scan of {estimated:,} rows with no date range on {on}"
+        else:
+            needs_approval = False
+            reason = f"ok; estimated scan {estimated:,} rows"
+        if needs_approval:
+            reason += "; needs approval"
         return GuardDecision(
             allowed=True,
             sql=outcome.sql,
@@ -138,18 +173,14 @@ class Warehouse:
             needs_approval=needs_approval,
         )
 
-    def _table_rows(self, qualified_names: tuple[str, ...]) -> int:
-        sizes = {f"{t.schema}.{t.name}": t.row_count for t in self.tables()}
-        return sum(sizes.get(name, 0) for name in qualified_names)
-
-    def _estimate_rows(self, sql: str) -> int:
+    def _plan(self, sql: str) -> PlanEstimate:
+        """The optimised plan's estimate; empty when DuckDB cannot plan the query (it would fail to run)."""
         con = self._connect()
         try:
-            plan = con.execute(f"EXPLAIN {sql}").fetchall()
-            text = "\n".join(str(part) for row in plan for part in row)
-            return estimated_rows_from_explain(text)
+            rows = con.execute(f"EXPLAIN (FORMAT JSON) {sql}").fetchall()
+            return plan_estimate([node for _, text in rows for node in json.loads(text)])
         except duckdb.Error:
-            return 0
+            return PlanEstimate()
         finally:
             con.close()
 

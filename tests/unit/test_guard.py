@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from analyst_agent.guard import check_sql, estimated_rows_from_explain, has_date_filter
+from analyst_agent.guard import check_sql, date_bounded_references, is_date_column, plan_estimate
 
 SCHEMAS = ["main_marts", "marts"]
 TABLES = {
@@ -79,16 +79,97 @@ def test_banned_word_inside_a_select_is_fine() -> None:
     assert out.allowed
 
 
-def test_explain_estimates_both_plan_formats() -> None:
-    assert estimated_rows_from_explain("│ ~6,927 rows │ ... │ ~232,116 rows │") == 232116
-    assert estimated_rows_from_explain("SEQ_SCAN EC: 1,000 PROJECTION EC: 42") == 1000
-    assert estimated_rows_from_explain("~1 row") == 1
-    assert estimated_rows_from_explain("no estimates here") == 0
+FCT, DIM = "main_marts.fct_station_day", "main_marts.dim_station"
+DATES = {FCT: {"obs_date"}, DIM: {"valid_from", "valid_to"}}
 
 
-def test_has_date_filter() -> None:
-    assert has_date_filter("select * from t where obs_date = date '2026-10-10'")
-    assert has_date_filter("select * from t where valid_from < now()")
-    assert not has_date_filter("select * from t where state = 'FL'")
-    assert not has_date_filter("select obs_date from t")
-    assert not has_date_filter("not sql at all (")
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("select * from fct_station_day where obs_date = date '2026-10-10'", [(FCT, True)]),
+        ("select * from fct_station_day where date '2026-10-10' <= obs_date and tmax_c > 0", [(FCT, True)]),
+        (
+            "select * from fct_station_day f where f.obs_date in (date '2026-10-10', date '2026-10-11')",
+            [(FCT, True)],
+        ),
+        (
+            "select * from fct_station_day where (obs_date between date '2026-10-10' and date '2026-10-11')",
+            [(FCT, True)],
+        ),
+        ("select * from dim_station where valid_from < now()", [(DIM, True)]),
+        ("select * from fct_station_day where state = 'FL'", [(FCT, False)]),
+        ("select * from fct_station_day where obs_date is not null", [(FCT, False)]),
+        ("select * from fct_station_day where obs_date = date '2026-10-10' or tmax_c > 0", [(FCT, False)]),
+        ("select * from fct_station_day where obs_date >= last_loaded_at", [(FCT, False)]),
+        (
+            "select * from fct_station_day where obs_date = (select max(obs_date) from fct_station_day)",
+            [(FCT, False), (FCT, False)],
+        ),
+        (
+            "select * from fct_station_day a, fct_station_day b where a.obs_date = date '2026-10-10'",
+            [(FCT, True), (FCT, False)],
+        ),
+        (
+            "select * from fct_station_day f join dim_station d on d.station_id = f.station_id "
+            "and f.obs_date = date '2026-10-10'",
+            [(FCT, True), (DIM, False)],
+        ),
+        (
+            "with x as (select * from fct_station_day where obs_date = date '2026-10-10') "
+            "select * from x a, x b",
+            [(FCT, True)],
+        ),
+    ],
+)
+def test_date_bounded_references(sql: str, expected: list[tuple[str, bool]]) -> None:
+    assert sorted(date_bounded_references(sql, SCHEMAS, TABLES, DATES)) == sorted(expected)
+
+
+def test_date_columns() -> None:
+    assert all(map(is_date_column, ["obs_date", "first_obs_date", "valid_from", "valid_to"]))
+    assert not any(map(is_date_column, ["last_loaded_at", "state", "tmax_c"]))
+
+
+def _scan(table: str, rows: int, filters: str | list[str] | None = None) -> dict:
+    info = {"Table": f"demo.main_marts.{table}", "Estimated Cardinality": str(rows)}
+    if filters is not None:
+        info["Filters"] = filters
+    return {"name": "SEQ_SCAN", "children": [], "extra_info": info}
+
+
+def test_plan_estimate_multiplies_pairwise_joins_and_lists_scan_filters() -> None:
+    plan = [
+        {
+            "name": "UNGROUPED_AGGREGATE",
+            "extra_info": {},
+            "children": [
+                {
+                    "name": "CROSS_PRODUCT",
+                    "extra_info": {},
+                    "children": [
+                        _scan("fct_station_day", 1_000),
+                        _scan("fct_station_day", 200, ["obs_date='2026-10-10'::DATE", "tmax_c>0"]),
+                    ],
+                }
+            ],
+        }
+    ]
+    est = plan_estimate(plan)
+    assert (est.pairs, est.rows) == (200_000, 200_000)
+    assert est.filtered_scans(FCT, {"obs_date"}) == 1
+    assert est.filtered_scans(FCT, {"date"}) == 0  # whole names only
+    assert est.filtered_scans(DIM, {"obs_date"}) == 0
+
+
+def test_plan_estimate_counts_a_one_row_aggregate_as_one_row() -> None:
+    total = {"name": "UNGROUPED_AGGREGATE", "extra_info": {}, "children": [_scan("dim_station", 5_000)]}
+    plan = [{"name": "CROSS_PRODUCT", "extra_info": {}, "children": [_scan("dim_station", 5_000), total]}]
+    assert plan_estimate(plan).pairs == 5_000
+    hash_join = [
+        {
+            "name": "HASH_JOIN",
+            "extra_info": {"Estimated Cardinality": "40"},
+            "children": [_scan("dim_station", 5_000), _scan("fct_station_day", 70)],
+        }
+    ]
+    assert (plan_estimate(hash_join).pairs, plan_estimate(hash_join).rows) == (0, 5_000)

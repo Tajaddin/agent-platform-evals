@@ -18,7 +18,7 @@ flowchart LR
     S -->|clarify / refuse / small talk| END1([response])
     A --> G[guard<br/>sqlglot allowlist, LIMIT, scan estimate]
     G -->|rejected, up to 2x| A
-    G -->|expensive, no date filter| H{{human approval<br/>LangGraph interrupt}}
+    G -->|expensive, no date range| H{{human approval<br/>LangGraph interrupt}}
     H -->|approved| X
     H -->|declined| END2([refused])
     G -->|ok| X[execute<br/>read-only DuckDB, timeout, row cap]

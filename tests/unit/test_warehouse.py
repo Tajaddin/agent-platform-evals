@@ -50,6 +50,68 @@ def test_guard_passes_filtered_and_small_queries(wh: Warehouse) -> None:
     assert d2.allowed and not d2.needs_approval
 
 
+def test_guard_requires_approval_for_a_self_cross_join(wh: Warehouse) -> None:
+    # A vacuous date predicate used to skip approval, and the self-join was estimated as one 232,116-row scan.
+    d = wh.guard(
+        "select count(*) from main_marts.fct_station_day a, main_marts.fct_station_day b "
+        "where a.obs_date is not null",
+        100_000,
+    )
+    assert d.allowed and d.needs_approval
+    assert d.estimated_rows > 2 * 232_116
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # not a range
+        "select count(*) from main_marts.fct_station_day where obs_date is not null",
+        "select count(*) from main_marts.fct_station_day where obs_date = date '2026-10-10' or tmax_c > 0",
+        # a range that covers all the data
+        "select count(*) from main_marts.fct_station_day where obs_date >= date '1900-01-01'",
+        "select station_id from main_marts.fct_station_day "
+        "where obs_date between date '2026-10-01' and date '2026-10-31'",
+        # only one of the two references is bounded
+        "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b "
+        "on a.station_id = b.station_id where a.obs_date = date '2026-10-10'",
+        # a predicate in a LEFT JOIN's ON clause does not filter the left table
+        "select count(*) from main_marts.fct_station_day f left join main_marts.dim_station d "
+        "on d.station_id = f.station_id and f.obs_date = date '2026-10-10'",
+    ],
+)
+def test_guard_requires_a_real_date_range_on_every_large_reference(wh: Warehouse, sql: str) -> None:
+    d = wh.guard(sql, 100_000)
+    assert d.allowed and d.needs_approval, d.reason
+
+
+def test_guard_requires_approval_for_a_pairwise_join_even_when_dates_are_bounded(wh: Warehouse) -> None:
+    d = wh.guard(
+        "select count(*) from main_marts.fct_station_day a, main_marts.fct_station_day b "
+        "where a.obs_date = date '2026-10-10' and b.obs_date = date '2026-10-10'",
+        100_000,
+    )
+    assert d.allowed and d.needs_approval
+    assert "pairs" in d.reason
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date between date '2026-10-10' and date '2026-10-11'",
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date in (date '2026-10-10', date '2026-10-12')",
+        "select f.station_id, d.state from main_marts.fct_station_day f join main_marts.dim_station d "
+        "on d.station_id = f.station_id and d.is_current where f.obs_date = date '2026-10-14'",
+        "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b "
+        "on a.station_id = b.station_id where a.obs_date = date '2026-10-10' and b.obs_date = date '2026-10-11'",
+    ],
+)
+def test_guard_passes_date_bounded_queries(wh: Warehouse, sql: str) -> None:
+    d = wh.guard(sql, 100_000)
+    assert d.allowed and not d.needs_approval, d.reason
+
+
 def test_guard_rejects_and_explains(wh: Warehouse) -> None:
     d = wh.guard("delete from main_marts.dim_station", 100_000)
     assert not d.allowed

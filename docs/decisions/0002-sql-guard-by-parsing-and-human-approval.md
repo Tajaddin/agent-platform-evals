@@ -20,10 +20,16 @@ Three independent layers (`guard.py`, `warehouse.py`):
 2. **The connection cannot do damage anyway.** DuckDB is opened `read_only=True`, one connection per
    query, with a wall-clock timeout enforced by `connection.interrupt()` from a timer thread and a fetch
    cap of `row_limit + 1` so truncation is detected and reported.
-3. **Expensive is a human decision.** The guard estimates the scan from the referenced tables' row counts
-   and DuckDB's `EXPLAIN` cardinalities. Above `approval_row_threshold` (100,000 rows) with no date filter,
-   the graph interrupts; the API returns `approval_required` with the SQL and estimate, and the thread
-   resumes only on `POST /v1/threads/{id}/approve`. Approval state survives process restarts because it
+3. **Expensive is a human decision.** The guard estimates the scan from DuckDB's optimised plan
+   (`EXPLAIN (FORMAT JSON)`) and the row counts of every table reference (a self-join counts twice). The
+   graph interrupts when a join without an equality condition would compare more than
+   `approval_row_threshold` (100,000) row pairs, whatever its filters, or when the scan estimate is above
+   the threshold and some reference to a table larger than the threshold has no real date range: a
+   constant bound (`=`, `IN`, `BETWEEN`, `<`, `>`) on a date column, AND-ed into that reference's own
+   `WHERE` or `ON`, which the optimiser kept as a filter on the table's scan. The optimiser drops ranges the
+   table statistics prove always true (`obs_date >= date '1900-01-01'`), so those do not count, and neither
+   do `IS NOT NULL`, OR-ed terms or comparisons with other columns. The API returns `approval_required`
+   with the SQL and estimate, and the thread resumes only on `POST /v1/threads/{id}/approve`. Approval state survives process restarts because it
    lives in the checkpointer (tested against Postgres).
 
 ## Consequences
@@ -32,8 +38,11 @@ Three independent layers (`guard.py`, `warehouse.py`):
   queries all pass the guard (any rule that is too strict fails CI).
 - A rejected query goes back to the analyst with the reason, so a real model gets one chance to fix a
   schema slip rather than failing the turn.
-- The row estimate is deliberately pessimistic (table size, not post-filter cardinality) for queries
-  without a date filter; a filtered query is trusted to `EXPLAIN`. The threshold is a setting and the
-  tests show changing it moves the approval boundary.
+- The row estimate is deliberately pessimistic (table size, not post-filter cardinality); a date range
+  on every large reference is what lets a big table through without a human. The threshold is a setting
+  and the tests show changing it moves the approval boundary.
+- A range that excludes only part of the data (`obs_date > date '2026-10-03'` over 12 days) counts as a
+  date range: selectivity is not estimated. The rule is conservative elsewhere: a range that reaches a
+  reference only through a join condition or an outer query's filter does not count for it.
 - Not covered: query cost in CPU terms (a nasty regex over 90,000 rows is "cheap" by row count). The
   timeout is the backstop for that.

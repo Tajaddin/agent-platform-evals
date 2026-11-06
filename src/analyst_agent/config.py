@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     allowed_schemas: list[str] = Field(default_factory=lambda: ["main_marts", "marts"])
     row_limit: int = 200
     query_timeout_seconds: float = 20.0
-    # Human-in-the-loop: a query whose estimated scan exceeds this many rows and has no date filter
-    # pauses the graph until someone approves it.
+    # Human-in-the-loop: a query whose estimated scan exceeds this many rows without a date range on every
+    # large table, or whose cross join compares more row pairs than this, pauses until someone approves it.
     approval_row_threshold: int = 100_000
 
     # API
