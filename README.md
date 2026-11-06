@@ -110,8 +110,9 @@ uv run analyst-agent serve                           # http://localhost:8000/doc
 make test && make evals                              # the full local gate, no key needed
 ```
 
-With Docker: `make up` (API + Postgres), `make up-obs` (adds OTel collector, Tempo, Prometheus, Alertmanager,
-Grafana with the provisioned dashboard at http://localhost:3000), `make load`, `make down`.
+With Docker, after setting `POSTGRES_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` in `.env` (there are no defaults):
+`make up` (API + Postgres), `make up-obs` (adds OTel collector, Tempo, Prometheus, Alertmanager, Grafana with
+the provisioned dashboard at http://localhost:3000), `make load`, `make down`. Ports bind to 127.0.0.1 only.
 See [docs/DEPLOY.md](docs/DEPLOY.md) for AWS.
 
 Real models: `AGENT_PROVIDER=anthropic` with `ANTHROPIC_API_KEY`, or `AGENT_PROVIDER=bedrock` with AWS

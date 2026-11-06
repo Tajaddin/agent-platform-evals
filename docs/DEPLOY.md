@@ -22,8 +22,10 @@ make load        # k6, 10 virtual users for 60 s, writes load/results/summary.js
 make down
 ```
 
-Ports (all overridable in `.env`): API 8000, Postgres 5432, Grafana 3000 (admin / `GRAFANA_ADMIN_PASSWORD`),
-Prometheus 9090, Alertmanager 9093, Tempo 3200. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`
+Set `POSTGRES_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` in `.env` first; there are no default passwords and
+compose refuses to start without them. Ports (all overridable in `.env`, all bound to 127.0.0.1): API 8000,
+Postgres 5432, Grafana 3000 (admin / `GRAFANA_ADMIN_PASSWORD`), Prometheus 9090, Alertmanager 9093,
+Tempo 3200. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`
 in `.env` when the observability profile is up so the API exports spans. Raise `AGENT_RATE_LIMIT` before a
 load test; the default 30/minute per key is for the public endpoint.
 
