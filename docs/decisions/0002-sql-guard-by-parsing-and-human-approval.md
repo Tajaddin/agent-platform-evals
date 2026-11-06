@@ -40,7 +40,8 @@ Three independent layers (`guard.py`, `warehouse.py`):
 - 17 rejection cases and the allow paths are unit tested without a model; the eval gate proves the gold
   queries all pass the guard (any rule that is too strict fails CI).
 - A rejected query goes back to the analyst with the reason, so a real model gets one chance to fix a
-  schema slip rather than failing the turn.
+  schema slip rather than failing the turn. A query DuckDB cannot plan (an unknown column) is rejected with
+  DuckDB's error rather than sent for approval.
 - The row estimate is deliberately pessimistic (table size, not post-filter cardinality); a date range
   on every large reference is what lets a big table through without a human. The threshold is a setting
   and the tests show changing it moves the approval boundary.

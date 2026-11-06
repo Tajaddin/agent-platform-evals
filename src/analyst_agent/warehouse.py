@@ -160,7 +160,11 @@ class Warehouse:
             for t in self.tables()
         }
         refs = date_bounded_references(outcome.sql, self.allowed_schemas, self.allowed_tables(), dates)
-        plan = self._plan(outcome.sql)
+        try:
+            plan = self._plan(outcome.sql)
+        except duckdb.Error as exc:  # it would fail to run too; the analyst gets the error to repair
+            reason = f"DuckDB cannot plan it: {str(exc)[:300]}"
+            return GuardDecision(allowed=False, sql=outcome.sql, reason=reason)
         # EXPLAIN alone under-reports (a bare count(*) becomes a statistics lookup), so the scan estimate also
         # counts every reference at its table's full size; a self-join counts twice.
         estimated = max(plan.rows, plan.pairs, sum(sizes.get(t, 0) for t, _ in refs))
@@ -191,13 +195,11 @@ class Warehouse:
         )
 
     def _plan(self, sql: str) -> PlanEstimate:
-        """The optimised plan's estimate; empty when DuckDB cannot plan the query (it would fail to run)."""
+        """The optimised plan's estimate. Raises duckdb.Error when DuckDB cannot plan the query."""
         con = self._connect()
         try:
             rows = con.execute(f"EXPLAIN (FORMAT JSON) {sql}").fetchall()
             return plan_estimate([node for _, text in rows for node in json.loads(text)])
-        except duckdb.Error:
-            return PlanEstimate()
         finally:
             con.close()
 

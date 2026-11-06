@@ -112,6 +112,17 @@ def test_guard_passes_date_bounded_queries(wh: Warehouse, sql: str) -> None:
     assert d.allowed and not d.needs_approval, d.reason
 
 
+def test_guard_rejects_a_query_duckdb_cannot_plan_so_the_analyst_can_repair_it(wh: Warehouse) -> None:
+    # This used to need approval for "no date range": the failed EXPLAIN left no scan filters to read.
+    d = wh.guard(
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date = date '2026-10-10' and no_such_col > 0",
+        100_000,
+    )
+    assert not d.allowed and not d.needs_approval
+    assert "no_such_col" in d.reason
+
+
 def test_connections_cap_threads_and_memory(warehouse_path: Path) -> None:
     capped = Warehouse(warehouse_path, ["main_marts"], 10, 20.0, threads=1, memory_limit="256MiB")
     r = capped.run("select current_setting('threads') as t, current_setting('memory_limit') as m")
