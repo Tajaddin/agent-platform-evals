@@ -42,9 +42,10 @@ terraform apply                                      # ~5 min; prints alb_dns_na
 ```
 
 Then in the GitHub repository: add the secret `AWS_ROLE_ARN` = `github_actions_role_arn`, run the `deploy`
-workflow on `main` (Actions tab, "Run workflow"; the role trusts runs on `main` only). It builds the image, pushes it to ECR, rolls the ECS service and
-curls `/readyz` through the load balancer. The first `apply` creates the service with no image in ECR yet,
-so the task fails until the first deploy run; that is expected.
+workflow on `main` (Actions tab, "Run workflow"; the role trusts runs on `main` only). It builds the image,
+pushes it to ECR, rolls the ECS service and curls `/readyz` through the load balancer. The first `apply`
+creates the service with no image in ECR yet, so the task fails until the first deploy run; that is
+expected.
 
 Smoke test:
 

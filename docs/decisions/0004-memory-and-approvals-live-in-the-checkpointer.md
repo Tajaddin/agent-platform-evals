@@ -12,11 +12,12 @@ second replica loses them.
 
 Thread state is the graph state: `history` (append-only, reducer) plus the current turn's fields, keyed by
 `thread_id` through the checkpointer. Through the API the key is `<hash of the API key>/<thread_id>`, so
-thread ids are a per-key namespace and one key cannot reach another key's history or pending approval. Locally and in tests that is `MemorySaver`; when
-`AGENT_DATABASE_URL` is set it is `PostgresSaver` on a psycopg connection pool (`saver.setup()` creates its
-tables on first start). Each turn starts with `new_turn_input()`, which resets the per-turn fields and
-leaves `history` to the reducer; per-turn `usage` is summed explicitly in the nodes rather than through a
-reducer so it does not accumulate across turns (a bug the test suite caught).
+thread ids are a per-key namespace and one key cannot reach another key's history or pending approval.
+Locally and in tests the checkpointer is `MemorySaver`; when `AGENT_DATABASE_URL` is set it is
+`PostgresSaver` on a psycopg connection pool (`saver.setup()` creates its tables on first start). Each
+turn starts with `new_turn_input()`, which resets the per-turn fields and leaves `history` to the reducer;
+per-turn `usage` is summed explicitly in the nodes rather than through a reducer so it does not accumulate
+across turns (a bug the test suite caught).
 
 The approval interrupt is a checkpoint like any other: `POST /v1/threads/{id}/approve` resumes with
 `Command(resume=bool)`. A new message on a thread with a pending approval starts a fresh run and discards
@@ -29,5 +30,7 @@ the pending one, which is documented and tested rather than left implicit.
   against a Postgres service container.
 - Readiness (`/readyz`) checks both the warehouse file and a `select 1` on the pool, so a replica with a
   broken database connection is taken out of the load balancer.
+- Rotating or removing an API key starts a fresh thread namespace: the old key's threads and pending
+  approvals stay in the checkpointer, but no key can reach them.
 - History is the full exchange text; the planner sees the last six turns. There is no summarisation and
   no retention policy, which would be the next step for a long-lived deployment.
