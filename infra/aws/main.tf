@@ -86,6 +86,7 @@ resource "aws_db_instance" "this" {
   instance_class          = var.db_instance_class
   allocated_storage       = 20
   storage_type            = "gp3"
+  storage_encrypted       = true
   db_name                 = "agent"
   username                = "agent"
   password                = random_password.db.result
@@ -141,12 +142,18 @@ resource "aws_iam_role" "task" {
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
 }
 
+locals {
+  # An inference profile id is the model id with a geography prefix (us., eu., apac., ...).
+  bedrock_foundation_model = replace(var.bedrock_model_id, "/^(us|us-gov|eu|apac|global)\\./", "")
+}
+
 data "aws_iam_policy_document" "task_bedrock" {
   statement {
     actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
     resources = [
       "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
-      "arn:aws:bedrock:*::foundation-model/*",
+      # The profile serves each call from the model in one of its regions, so only the region is a wildcard.
+      "arn:aws:bedrock:*::foundation-model/${local.bedrock_foundation_model}",
     ]
   }
 }
@@ -160,10 +167,11 @@ resource "aws_iam_role_policy" "task_bedrock" {
 # ----------------------------------------------------------------------------- load balancer
 
 resource "aws_lb" "this" {
-  name               = var.name
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  name                       = var.name
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb.id]
+  subnets                    = aws_subnet.public[*].id
+  drop_invalid_header_fields = true
 }
 
 resource "aws_lb_target_group" "this" {
@@ -311,10 +319,12 @@ data "aws_iam_policy_document" "github_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # Only workflow runs on main (the deploy workflow is dispatched from there); other branches and pull
+    # requests in the repository cannot assume the role.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      values   = ["repo:${var.github_repository}:ref:refs/heads/main"]
     }
   }
 }
