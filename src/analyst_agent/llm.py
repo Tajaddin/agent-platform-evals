@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -47,10 +47,15 @@ class Planner(Protocol):
         self, question: str, schema: str, history: list[Turn], feedback: str | None
     ) -> tuple[SqlPlan, Usage]: ...
     def synthesize(
-        self, question: str, sql: str, result: QueryResult, issues: list[str], history: list[Turn]
-    ) -> Iterator[str]: ...
+        self,
+        question: str,
+        sql: str,
+        result: QueryResult,
+        issues: list[str],
+        history: list[Turn],
+        on_token: Callable[[str], None],
+    ) -> tuple[str, Usage]: ...
     def verify(self, question: str, answer: str, result: QueryResult) -> tuple[Verification, Usage]: ...
-    def last_usage(self) -> Usage: ...
 
 
 # ----------------------------------------------------------------------------------------------
@@ -121,11 +126,12 @@ def _is_transient(exc: BaseException) -> bool:
 
 
 class LangChainPlanner:
+    """One instance serves every request, so it keeps no per-call state: each call returns its own Usage."""
+
     name = "langchain"
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._usage = Usage()
         if settings.provider == "anthropic":
             from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
 
@@ -151,9 +157,6 @@ class LangChainPlanner:
         else:
             raise ValueError(f"LangChainPlanner cannot serve provider {settings.provider}")
 
-    def last_usage(self) -> Usage:
-        return self._usage
-
     def _cost(self, inp: int, out: int) -> float:
         s = self.settings
         return round(inp / 1e6 * s.price_input_per_mtok + out / 1e6 * s.price_output_per_mtok, 6)
@@ -162,9 +165,7 @@ class LangChainPlanner:
         meta = getattr(msg, "usage_metadata", None) or {}
         inp = int(meta.get("input_tokens", 0) or 0)
         out = int(meta.get("output_tokens", 0) or 0)
-        u = Usage(input_tokens=inp, output_tokens=out, llm_calls=1, cost_usd=self._cost(inp, out))
-        self._usage = u
-        return u
+        return Usage(input_tokens=inp, output_tokens=out, llm_calls=1, cost_usd=self._cost(inp, out))
 
     def structured(self, schema: type[BaseModel], system: str, user: str) -> tuple[BaseModel, Usage]:
         runnable = self.llm.with_structured_output(schema, include_raw=True)
@@ -204,14 +205,21 @@ class LangChainPlanner:
         return parsed, usage
 
     def synthesize(
-        self, question: str, sql: str, result: QueryResult, issues: list[str], history: list[Turn]
-    ) -> Iterator[str]:
+        self,
+        question: str,
+        sql: str,
+        result: QueryResult,
+        issues: list[str],
+        history: list[Turn],
+        on_token: Callable[[str], None],
+    ) -> tuple[str, Usage]:
         fix = (
             f"\nA reviewer found these problems with your previous draft, fix them: {issues}"
             if issues
             else ""
         )
         user = f"Question: {question}\n\nQuery result:\n{_format_result(result)}{fix}"
+        parts: list[str] = []
         inp = out = 0
         for chunk in self.llm.stream([("system", SYNTH_SYSTEM), ("human", user)]):
             text = (
@@ -224,8 +232,10 @@ class LangChainPlanner:
                 inp = max(inp, int(meta.get("input_tokens", 0) or 0))
                 out = max(out, int(meta.get("output_tokens", 0) or 0))
             if text:
-                yield text
-        self._usage = Usage(input_tokens=inp, output_tokens=out, llm_calls=1, cost_usd=self._cost(inp, out))
+                parts.append(text)
+                on_token(text)
+        usage = Usage(input_tokens=inp, output_tokens=out, llm_calls=1, cost_usd=self._cost(inp, out))
+        return "".join(parts), usage
 
     def verify(self, question: str, answer: str, result: QueryResult) -> tuple[Verification, Usage]:
         parsed, usage = self.structured(
@@ -269,15 +279,11 @@ class FakePlanner:
     golden: dict[str, GoldenEntry]  # normalised question -> entry
     name: str = "fake"
     delay_ms: float = 0.0  # simulated model latency, for load tests
-    _usage: Usage = field(default_factory=Usage)
 
-    def last_usage(self) -> Usage:
-        return self._usage
-
-    def _tick(self) -> None:
+    def _tick(self) -> Usage:
         if self.delay_ms:
             time.sleep(self.delay_ms / 1000)
-        self._usage = Usage(input_tokens=0, output_tokens=0, llm_calls=1, cost_usd=0.0)
+        return Usage(input_tokens=0, output_tokens=0, llm_calls=1, cost_usd=0.0)
 
     def _lookup(self, question: str, history: list[Turn]) -> str | None:
         entry = self.golden.get(normalize(question))
@@ -286,43 +292,50 @@ class FakePlanner:
         return entry.sql
 
     def route(self, question: str, history: list[Turn]) -> tuple[Route, Usage]:
-        self._tick()
+        usage = self._tick()
         q = normalize(question)
         if self._lookup(question, history) is not None:
-            return Route(route="analyst"), self._usage
+            return Route(route="analyst"), usage
         if any(w in q.split() for w in ("delete", "drop", "update", "insert", "truncate", "modify")):
             msg = "I can only read the warehouse, not change it."
-            return Route(route="respond", status="refused", message=msg), self._usage
+            return Route(route="respond", status="refused", message=msg), usage
         if q in {"hello", "hi", "thanks", "thank you"} or q.startswith("what can you"):
-            return Route(route="respond", status="answered", message=ABOUT), self._usage
-        return Route(route="respond", status="clarify", message=CLARIFY), self._usage
+            return Route(route="respond", status="answered", message=ABOUT), usage
+        return Route(route="respond", status="clarify", message=CLARIFY), usage
 
     def plan(
         self, question: str, schema: str, history: list[Turn], feedback: str | None
     ) -> tuple[SqlPlan, Usage]:
-        self._tick()
+        usage = self._tick()
         sql = self._lookup(question, history)
         if sql is None:
-            return SqlPlan(action="clarify", message=CLARIFY), self._usage
+            return SqlPlan(action="clarify", message=CLARIFY), usage
         if feedback:  # the fake planner cannot repair; surface the rejection honestly
-            return SqlPlan(action="refuse", message=f"The query was rejected: {feedback}"), self._usage
-        return SqlPlan(action="sql", sql=sql, rationale="gold SQL from the golden set"), self._usage
+            return SqlPlan(action="refuse", message=f"The query was rejected: {feedback}"), usage
+        return SqlPlan(action="sql", sql=sql, rationale="gold SQL from the golden set"), usage
 
     def synthesize(
-        self, question: str, sql: str, result: QueryResult, issues: list[str], history: list[Turn]
-    ) -> Iterator[str]:
-        self._tick()
+        self,
+        question: str,
+        sql: str,
+        result: QueryResult,
+        issues: list[str],
+        history: list[Turn],
+        on_token: Callable[[str], None],
+    ) -> tuple[str, Usage]:
+        usage = self._tick()
         if result.row_count == 0:
-            yield "The query returned no rows."
-            return
+            text = "The query returned no rows."
+            on_token(text)
+            return text, usage
         first = ", ".join(f"{c}={v}" for c, v in zip(result.columns, result.rows[0], strict=False))
         text = f"Result: {first}. ({result.row_count} row{'s' if result.row_count != 1 else ''} returned.)"
         for word in text.split(" "):
-            yield word + " "
+            on_token(word + " ")
+        return text, usage
 
     def verify(self, question: str, answer: str, result: QueryResult) -> tuple[Verification, Usage]:
-        self._tick()
-        return Verification(supported=True, issues=[]), self._usage
+        return Verification(supported=True, issues=[]), self._tick()
 
 
 def planner_from_settings(settings: Settings, golden: dict[str, GoldenEntry] | None = None) -> Planner:

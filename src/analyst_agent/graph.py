@@ -139,15 +139,16 @@ def build_graph(
         result = QueryResult(**state["result"])
         issues = list((state.get("verification") or {}).get("issues", []))
         writer = get_stream_writer()
-        parts: list[str] = []
         with span("agent.synthesize", reflection=state.get("reflections", 0)):
-            for chunk in planner.synthesize(
-                state["question"], state["guard"]["sql"], result, issues, _history(state)
-            ):
-                parts.append(chunk)
-                writer({"type": "token", "text": chunk})
-        answer = "".join(parts).strip()
-        return {"answer": answer, "usage": _usage(state, planner.last_usage())}
+            answer, usage = planner.synthesize(
+                state["question"],
+                state["guard"]["sql"],
+                result,
+                issues,
+                _history(state),
+                lambda text: writer({"type": "token", "text": text}),
+            )
+        return {"answer": answer.strip(), "usage": _usage(state, usage)}
 
     def verify(state: AgentState) -> dict[str, Any]:
         result = QueryResult(**state["result"])

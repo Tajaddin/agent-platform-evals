@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from prometheus_client import generate_latest
 
+from analyst_agent import graph as graph_module
 from analyst_agent.config import Settings
 from analyst_agent.graph import MAX_REPAIRS
-from analyst_agent.llm import FakePlanner, GoldenEntry, Turn
+from analyst_agent.llm import FakePlanner, GoldenEntry, LangChainPlanner, Route, Turn
 from analyst_agent.schemas import QueryResult, SqlPlan, Usage, Verification
 from analyst_agent.service import AgentService
 
@@ -118,23 +121,27 @@ class ScriptedPlanner(FakePlanner):
     def plan(
         self, question: str, schema: str, history: list[Turn], feedback: str | None
     ) -> tuple[SqlPlan, Usage]:
-        self._tick()
         self.calls.append("plan")
         self.feedbacks.append(feedback)
-        return self.plans.pop(0), self._usage
+        return self.plans.pop(0), self._tick()
 
     def synthesize(
-        self, question: str, sql: str, result: QueryResult, issues: list[str], history: list[Turn]
-    ) -> Iterator[str]:
+        self,
+        question: str,
+        sql: str,
+        result: QueryResult,
+        issues: list[str],
+        history: list[Turn],
+        on_token: Callable[[str], None],
+    ) -> tuple[str, Usage]:
         self.calls.append(f"synthesize:{len(issues)}")
-        yield from super().synthesize(question, sql, result, issues, history)
+        return super().synthesize(question, sql, result, issues, history, on_token)
 
     def verify(self, question: str, answer: str, result: QueryResult) -> tuple[Verification, Usage]:
-        self._tick()
         self.calls.append("verify")
         if self.verifications:
-            return self.verifications.pop(0), self._usage
-        return Verification(supported=True), self._usage
+            return self.verifications.pop(0), self._tick()
+        return Verification(supported=True), self._tick()
 
 
 GOOD = "select count(*) as stations from main_marts.dim_station where is_current and state = 'FL'"
@@ -213,6 +220,58 @@ def test_persistent_verifier_failure_still_answers(
     assert resp.status == "answered"
     assert resp.verification is not None and not resp.verification.supported  # surfaced, not hidden
     assert planner.calls.count("synthesize:1") == 1
+
+
+class _Msg:
+    def __init__(self, content: str, tokens: tuple[int, int]) -> None:
+        self.content = content
+        self.usage_metadata = {"input_tokens": tokens[0], "output_tokens": tokens[1]}
+
+
+class StubChatModel:
+    """Stands in for ChatAnthropic. A call whose prompt mentions OTHER reports far more tokens."""
+
+    def _tokens(self, messages: list[tuple[str, str]]) -> tuple[int, int]:
+        return (1000, 100) if "OTHER" in messages[-1][1] else (10, 1)
+
+    def with_structured_output(self, schema: type, include_raw: bool = False) -> Any:
+        parsed = {
+            Route: Route(route="analyst"),
+            SqlPlan: SqlPlan(action="sql", sql=GOOD),
+            Verification: Verification(supported=True),
+        }[schema]
+        tokens = self._tokens
+
+        class Runnable:
+            def invoke(self, messages: list[tuple[str, str]]) -> dict[str, Any]:
+                return {"parsed": parsed, "raw": _Msg("", tokens(messages))}
+
+        return Runnable()
+
+    def stream(self, messages: list[tuple[str, str]]) -> Iterator[_Msg]:
+        yield _Msg("There are 2338 stations.", self._tokens(messages))
+
+
+def test_turn_usage_is_not_taken_from_a_concurrent_request(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner = LangChainPlanner.__new__(LangChainPlanner)
+    planner.settings = settings
+    planner.llm = StubChatModel()
+    real_span = graph_module.span
+
+    @contextmanager
+    def span(name: str, **attributes: Any) -> Iterator[Any]:
+        with real_span(name, **attributes) as s:
+            yield s
+        if name == "agent.synthesize":  # another request's call on the shared planner lands right here
+            planner.route("OTHER question on another thread", [])
+
+    monkeypatch.setattr(graph_module, "span", span)
+    resp = AgentService(settings, planner=planner).chat("u1", FL)
+    assert resp.status == "answered"
+    # route, plan, synthesize and verify at 10 input / 1 output tokens each
+    assert (resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.llm_calls) == (40, 4, 4)
 
 
 def test_stream_emits_nodes_tokens_and_done(service: AgentService) -> None:
