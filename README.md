@@ -88,6 +88,9 @@ for the shipped image: a turn costs about 45 ms of Python CPU (sqlglot, LangGrap
 serialisation), so one process saturates near 20 turns/s and latency under 10 concurrent users is queueing.
 The deployment scales by adding ECS tasks rather than workers so that each task's Prometheus metrics stay
 whole (see limitations). Host: Windows 11, Docker Desktop, i7, 20 threads.
+These runs predate the DuckDB cap of 2 threads and 512 MiB (`AGENT_QUERY_THREADS`,
+`AGENT_QUERY_MEMORY_LIMIT`). DuckDB keeps one instance per file and configuration in a process, so the
+cap is shared by all of a worker's concurrent queries; the load table has not been re-measured with it.
 
 ### Tests and checks
 
