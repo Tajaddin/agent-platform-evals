@@ -96,7 +96,7 @@ cap is shared by all of a worker's concurrent queries; the load table has not be
 
 | Check | Count / result |
 |---|---|
-| Unit + integration tests (`make test`) | 110 passed, 92% line+branch coverage (CI floor 85%; re-run 2026-11-06) |
+| Unit + integration tests (`make test`) | 124 passed, 93% line+branch coverage (CI floor 85%; re-run 2026-11-06) |
 | Postgres memory tests (`make test-pg`) | 2 passed against the compose database: history and a pending approval survive a process restart |
 | Alert rules (`make alerts-test`) | 5 rules, 7 promtool unit tests, all firing and silent as specified |
 | Static | ruff, ruff format, mypy `--strict` on the package, gitleaks, `terraform validate` |
