@@ -61,16 +61,41 @@ def test_guard_requires_approval_for_a_self_cross_join(wh: Warehouse) -> None:
     assert d.estimated_rows > 2 * 232_116
 
 
+def test_guard_requires_approval_for_a_self_join_with_ranges_that_cover_all_the_data(wh: Warehouse) -> None:
+    # A second predicate on obs_date made DuckDB keep the vacuous range as a scan filter, which used to
+    # count as a date range; this ran 4.6e9 joined rows with no approval.
+    d = wh.guard(
+        "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b "
+        "on a.obs_date = b.obs_date "
+        "where a.obs_date >= date '1900-01-01' and a.obs_date is not null "
+        "and b.obs_date >= date '1900-01-01' and b.obs_date is not null",
+        100_000,
+    )
+    assert d.allowed and d.needs_approval
+    assert "no date range on main_marts.fct_station_day" in d.reason
+
+
 @pytest.mark.parametrize(
     "sql",
     [
         # not a range
         "select count(*) from main_marts.fct_station_day where obs_date is not null",
         "select count(*) from main_marts.fct_station_day where obs_date = date '2026-10-10' or tmax_c > 0",
-        # a range that covers all the data
+        # a range that covers all the data (2026-10-03 to 2026-10-14), alone or next to other date predicates
         "select count(*) from main_marts.fct_station_day where obs_date >= date '1900-01-01'",
         "select station_id from main_marts.fct_station_day "
         "where obs_date between date '2026-10-01' and date '2026-10-31'",
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date between date '2026-10-03' and date '2026-10-14'",
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date >= date '1900-01-01' and obs_date is not null",
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date >= date '1900-01-01' and year(obs_date) > 0",
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date >= date '1900-01-01' and cast(obs_date as varchar) like '2026%'",
+        # an IN list is judged by the range it spans
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date in (date '2026-10-03', date '2026-10-14')",
         # only one of the two references is bounded
         "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b "
         "on a.station_id = b.station_id where a.obs_date = date '2026-10-10'",
@@ -101,6 +126,9 @@ def test_guard_requires_approval_for_a_pairwise_join_even_when_dates_are_bounded
         "where obs_date between date '2026-10-10' and date '2026-10-11'",
         "select count(*) from main_marts.fct_station_day "
         "where obs_date in (date '2026-10-10', date '2026-10-12')",
+        # the second bound leaves out the last day
+        "select count(*) from main_marts.fct_station_day "
+        "where obs_date >= date '1900-01-01' and obs_date < date '2026-10-14'",
         "select f.station_id, d.state from main_marts.fct_station_day f join main_marts.dim_station d "
         "on d.station_id = f.station_id and d.is_current where f.obs_date = date '2026-10-14'",
         "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b "

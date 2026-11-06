@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from analyst_agent.guard import check_sql, date_bounded_references, is_date_column, plan_estimate
+from analyst_agent.guard import DateBound, check_sql, date_bounds, is_date_column, plan_estimate
 
 SCHEMAS = ["main_marts", "marts"]
 TABLES = {
@@ -122,7 +122,25 @@ DATES = {FCT: {"obs_date"}, DIM: {"valid_from", "valid_to"}}
     ],
 )
 def test_date_bounded_references(sql: str, expected: list[tuple[str, bool]]) -> None:
-    assert sorted(date_bounded_references(sql, SCHEMAS, TABLES, DATES)) == sorted(expected)
+    refs = date_bounds(sql, SCHEMAS, TABLES, DATES)
+    assert sorted((table, bool(bounds)) for table, bounds in refs) == sorted(expected)
+
+
+def test_date_bounds_name_the_column_v_so_they_can_be_checked_against_its_range() -> None:
+    sql = (
+        "select * from fct_station_day f join dim_station d on d.station_id = f.station_id "
+        "where date '2026-10-10' <= f.obs_date and f.obs_date in (date '2026-10-11') and d.valid_from < now()"
+    )
+    assert date_bounds(sql, SCHEMAS, TABLES, DATES) == [
+        (
+            FCT,
+            (
+                DateBound("obs_date", "CAST('2026-10-10' AS DATE) <= v"),
+                DateBound("obs_date", "v IN (CAST('2026-10-11' AS DATE))"),
+            ),
+        ),
+        (DIM, (DateBound("valid_from", "v < NOW()"),)),
+    ]
 
 
 def test_date_columns() -> None:

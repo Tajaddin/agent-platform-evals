@@ -6,17 +6,18 @@ import json
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
 from analyst_agent.guard import (
+    DateBound,
     GuardOutcome,
     PlanEstimate,
     check_sql,
-    date_bounded_references,
+    date_bounds,
     is_date_column,
     plan_estimate,
 )
@@ -36,6 +37,7 @@ class TableInfo:
     columns: list[ColumnInfo]
     row_count: int
     description: str = ""
+    date_ranges: dict[str, tuple[Any, Any]] = field(default_factory=dict)  # date column -> (min, max)
 
 
 TABLE_DESCRIPTIONS = {
@@ -114,14 +116,20 @@ class Warehouse:
                         "where table_schema = ? and table_name = ? order by ordinal_position",
                         [schema, name],
                     ).fetchall()
-                    count = con.execute(f'select count(*) from "{schema}"."{name}"').fetchone()
+                    dated = [c for c, _ in cols if is_date_column(c)]
+                    ranges = "".join(f', min("{c}"), max("{c}")' for c in dated)
+                    stats = con.execute(f'select count(*){ranges} from "{schema}"."{name}"').fetchone()
+                    assert stats is not None  # an aggregate without GROUP BY returns one row
                     out.append(
                         TableInfo(
                             schema=schema,
                             name=name,
                             columns=[ColumnInfo(c, t) for c, t in cols],
-                            row_count=int(count[0]) if count else 0,
+                            row_count=int(stats[0]),
                             description=TABLE_DESCRIPTIONS.get(name, ""),
+                            date_ranges={
+                                c.lower(): (stats[1 + 2 * i], stats[2 + 2 * i]) for i, c in enumerate(dated)
+                            },
                         )
                     )
                 self._tables = out
@@ -148,20 +156,18 @@ class Warehouse:
 
         Approval is needed when a pairwise join (no equality condition) would compare more row pairs than
         the threshold, or when the estimated scan exceeds the threshold and some reference to a table larger
-        than the threshold lacks a real date range: a constant bound on a date column that the optimiser
-        kept as a filter on that table's scan.
+        than the threshold lacks a real date range: a constant bound on a date column that leaves out some
+        of the table's dates, and that the optimiser kept as a filter on that table's scan.
         """
         outcome: GuardOutcome = check_sql(sql, self.allowed_schemas, self.allowed_tables(), self.row_limit)
         if not outcome.allowed:
             return GuardDecision(allowed=False, sql=outcome.sql, reason=outcome.reason)
-        sizes = {f"{t.schema}.{t.name}": t.row_count for t in self.tables()}
-        dates = {
-            f"{t.schema}.{t.name}": {c.name.lower() for c in t.columns if is_date_column(c.name)}
-            for t in self.tables()
-        }
-        refs = date_bounded_references(outcome.sql, self.allowed_schemas, self.allowed_tables(), dates)
+        tables = {f"{t.schema}.{t.name}": t for t in self.tables()}
+        sizes = {name: t.row_count for name, t in tables.items()}
+        dates = {name: set(t.date_ranges) for name, t in tables.items()}
+        refs = date_bounds(outcome.sql, self.allowed_schemas, self.allowed_tables(), dates)
         try:
-            plan = self._plan(outcome.sql)
+            plan, ranged = self._inspect(outcome.sql, [(tables[t], bounds) for t, bounds in refs])
         except duckdb.Error as exc:  # it would fail to run too; the analyst gets the error to repair
             reason = f"DuckDB cannot plan it: {str(exc)[:300]}"
             return GuardDecision(allowed=False, sql=outcome.sql, reason=reason)
@@ -170,10 +176,10 @@ class Warehouse:
         estimated = max(plan.rows, plan.pairs, sum(sizes.get(t, 0) for t, _ in refs))
         large = Counter(t for t, _ in refs if sizes.get(t, 0) > approval_row_threshold)
         unbounded = sorted(
-            {t for t, bounded in refs if t in large and not bounded}
+            {t for (t, _), real in zip(refs, ranged, strict=True) if t in large and not real}
             | {t for t, n in large.items() if plan.filtered_scans(t, dates.get(t, set())) < n}
         )
-        date_bounded = not unbounded and any(bounded for _, bounded in refs)
+        date_bounded = not unbounded and any(ranged)
         if plan.pairs > approval_row_threshold:
             needs_approval = True
             reason = f"a join without an equality condition compares about {plan.pairs:,} row pairs"
@@ -194,12 +200,22 @@ class Warehouse:
             needs_approval=needs_approval,
         )
 
-    def _plan(self, sql: str) -> PlanEstimate:
-        """The optimised plan's estimate. Raises duckdb.Error when DuckDB cannot plan the query."""
+    def _inspect(
+        self, sql: str, refs: list[tuple[TableInfo, tuple[DateBound, ...]]]
+    ) -> tuple[PlanEstimate, list[bool]]:
+        """DuckDB's optimised plan, and for each reference whether one of its date bounds leaves out data.
+
+        A bound leaves out data when it is false at the column's earliest or latest value. A bound is a
+        single range (an IN list is taken as the range it spans), so one that holds at both ends holds for
+        every row: `obs_date >= date '1900-01-01'` is no range. Raises duckdb.Error when DuckDB cannot plan
+        the query.
+        """
         con = self._connect()
         try:
             rows = con.execute(f"EXPLAIN (FORMAT JSON) {sql}").fetchall()
-            return plan_estimate([node for _, text in rows for node in json.loads(text)])
+            plan = plan_estimate([node for _, text in rows for node in json.loads(text)])
+            ranged = [any(_leaves_out_data(con, table, b) for b in bounds) for table, bounds in refs]
+            return plan, ranged
         finally:
             con.close()
 
@@ -226,6 +242,16 @@ class Warehouse:
             truncated=truncated,
             elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
         )
+
+
+def _leaves_out_data(con: duckdb.DuckDBPyConnection, table: TableInfo, bound: DateBound) -> bool:
+    kind = next(c.type for c in table.columns if c.name.lower() == bound.column)
+    held = con.execute(
+        f"select bool_and(coalesce({bound.predicate}, false)) "
+        f"from (values (cast(? as {kind})), (cast(? as {kind}))) as ends(v)",
+        list(table.date_ranges[bound.column]),
+    ).fetchone()
+    return not (held and held[0])
 
 
 def _jsonable(v: Any) -> Any:

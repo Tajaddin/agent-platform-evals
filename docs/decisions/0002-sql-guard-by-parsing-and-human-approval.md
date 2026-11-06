@@ -29,10 +29,13 @@ Three independent layers (`guard.py`, `warehouse.py`):
    `approval_row_threshold` (100,000) row pairs, whatever its filters, or when the scan estimate is above
    the threshold and some reference to a table larger than the threshold has no real date range: a
    constant bound (`=`, `IN`, `BETWEEN`, `<`, `>`) on a date column, AND-ed into that reference's own
-   `WHERE` or `ON`, which the optimiser kept as a filter on the table's scan. The optimiser drops ranges the
-   table statistics prove always true (`obs_date >= date '1900-01-01'`), so those do not count, and neither
-   do `IS NOT NULL`, OR-ed terms or comparisons with other columns. The API returns `approval_required`
-   with the SQL and estimate, and the thread resumes only on `POST /v1/threads/{id}/approve`. Approval state survives process restarts because it
+   `WHERE` or `ON`, that is false at the column's earliest or latest value, and that the optimiser kept as
+   a filter on the table's scan. The earliest and latest values are read once, with the row counts, and
+   each bound is evaluated against them by DuckDB. A range that holds at both ends covers all the data
+   (`obs_date >= date '1900-01-01'`, however many other predicates sit next to it), so it does not count,
+   and neither do `IS NOT NULL`, functions of the column (`year(obs_date) > 0`), OR-ed terms or comparisons
+   with other columns. The API returns `approval_required` with the SQL and estimate, and the thread
+   resumes only on `POST /v1/threads/{id}/approve`. Approval state survives process restarts because it
    lives in the checkpointer (tested against Postgres).
 
 ## Consequences
@@ -46,7 +49,9 @@ Three independent layers (`guard.py`, `warehouse.py`):
   on every large reference is what lets a big table through without a human. The threshold is a setting
   and the tests show changing it moves the approval boundary.
 - A range that excludes only part of the data (`obs_date > date '2026-10-03'` over 12 days) counts as a
-  date range: selectivity is not estimated. The rule is conservative elsewhere: a range that reaches a
-  reference only through a join condition or an outer query's filter does not count for it.
+  date range: selectivity is not estimated. An `IN` list is judged by the range it spans, so one that
+  names both the earliest and the latest date needs approval even if it skips the days between. The rule
+  is conservative elsewhere too: a range that reaches a reference only through a join condition or an
+  outer query's filter does not count for it.
 - Not covered: query cost in CPU terms (a nasty regex over 90,000 rows is "cheap" by row count). The
   timeout is the backstop for that.

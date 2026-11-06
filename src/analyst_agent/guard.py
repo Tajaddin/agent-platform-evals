@@ -6,9 +6,9 @@ Rules (all enforced by parsing, not by string matching):
 - no table functions that read files or the network (read_parquet, read_csv, glob, ...);
 - no ATTACH, COPY, PRAGMA or other commands;
 - a LIMIT is enforced (added when missing, lowered when too high).
-For the approval gate it also reports which table references a constant date range bounds, and reads
-DuckDB's optimised plan for cardinalities, joins that compare every pair of rows, and the filters each
-table scan kept.
+For the approval gate it also lists the constant date bounds on each table reference, and reads DuckDB's
+optimised plan for cardinalities, joins that compare every pair of rows, and the filters each table scan
+kept.
 """
 
 from __future__ import annotations
@@ -171,21 +171,29 @@ def _bounded_column(predicate: exp.Expression) -> exp.Column | None:
     return column if isinstance(column, exp.Column) and values and constant else None
 
 
-def date_bounded_references(
+@dataclass(frozen=True)
+class DateBound:
+    """A constant bound on a date column, with the column renamed `v`: `v >= CAST('2026-10-03' AS DATE)`."""
+
+    column: str
+    predicate: str
+
+
+def date_bounds(
     sql: str,
     allowed_schemas: list[str],
     allowed_tables: dict[str, set[str]],
     date_columns: dict[str, set[str]],
-) -> list[tuple[str, bool]]:
-    """Every table reference as (schema.table, bounded); a self-join yields two entries.
+) -> list[tuple[str, tuple[DateBound, ...]]]:
+    """Every table reference as (schema.table, its date bounds); a self-join yields two entries.
 
-    A reference is bounded when its own SELECT's WHERE or JOIN ... ON clause has, among its AND-ed terms, a
-    constant bound on one of its table's `date_columns`. `IS NOT NULL`, OR-ed terms and comparisons with
-    other columns or subqueries do not count.
+    A reference's bounds are the AND-ed terms of its own SELECT's WHERE or JOIN ... ON clause that compare
+    one of its table's `date_columns` with constants. `IS NOT NULL`, OR-ed terms and comparisons with other
+    columns or subqueries are not bounds. Whether a bound leaves out any data is for the caller to decide.
     """
     tree = sqlglot.parse_one(sql, read="duckdb")
     cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, tuple[DateBound, ...]]] = []
     for select in tree.find_all(exp.Select):
         refs: list[tuple[str, str]] = []  # (alias, schema.table)
         for t in select.find_all(exp.Table):
@@ -201,7 +209,7 @@ def date_bounded_references(
             for j in select.find_all(exp.Join)
             if j.find_ancestor(exp.Select) is select and j.args.get("on") is not None
         ]
-        bounded: set[str] = set()
+        bounds: dict[str, list[DateBound]] = {alias: [] for alias, _ in refs}
         for predicate in (p for c in conditions for p in _conjuncts(c)):
             col = _bounded_column(predicate)
             if col is None:
@@ -213,8 +221,10 @@ def date_bounded_references(
                 and col.name.lower() in date_columns.get(table, set())
             ]
             if len(owners) == 1:
-                bounded.add(owners[0])
-        out += [(table, alias in bounded) for alias, table in refs]
+                # The bounded column is the predicate's only column.
+                renamed = predicate.transform(lambda n: exp.column("v") if isinstance(n, exp.Column) else n)
+                bounds[owners[0]].append(DateBound(col.name.lower(), renamed.sql(dialect="duckdb")))
+        out += [(table, tuple(bounds[alias])) for alias, table in refs]
     return out
 
 
@@ -233,8 +243,8 @@ class PlanEstimate:
     def filtered_scans(self, table: str, columns: set[str]) -> int:
         """Scans of `table` that kept a filter on one of `columns`.
 
-        The optimiser removes a filter it can prove always true from the table's statistics
-        (`obs_date >= date '1900-01-01'`, a range covering all the data), so such a range leaves no filter.
+        A bound the query states but the plan does not apply to the scan, such as one in a LEFT JOIN's ON
+        clause on the preserved table, leaves no filter here.
         """
         return sum(
             1
