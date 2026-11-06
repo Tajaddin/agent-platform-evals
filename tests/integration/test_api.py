@@ -154,6 +154,23 @@ def test_rate_limit(settings: Settings, golden: dict[str, GoldenEntry]) -> None:
     assert c.get("/healthz").status_code == 200  # probes are never limited
 
 
+def test_open_mode_rate_limits_by_client_not_by_header(
+    settings: Settings, golden: dict[str, GoldenEntry]
+) -> None:
+    open_tight = settings.model_copy(update={"api_keys": [], "rate_limit": "2/minute"})
+    svc = AgentService(open_tight, planner=FakePlanner(golden=golden))
+    with TestClient(create_app(open_tight, svc)) as c:
+        codes = [
+            c.post(
+                "/v1/chat",
+                json={"thread_id": "rl", "message": "Hello"},
+                headers={"X-API-Key": f"made-up-{i}"},
+            ).status_code
+            for i in range(3)
+        ]
+    assert codes == [200, 200, 429]
+
+
 def test_open_mode_when_no_keys_configured(settings: Settings, golden: dict[str, GoldenEntry]) -> None:
     open_settings = settings.model_copy(update={"api_keys": []})
     svc = AgentService(open_settings, planner=FakePlanner(golden=golden))

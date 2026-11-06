@@ -29,10 +29,6 @@ log = get_logger("analyst_agent.api")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def _key_or_ip(request: Request) -> str:
-    return request.headers.get("X-API-Key") or get_remote_address(request)
-
-
 def thread_owner(api_key: str) -> str:
     """The namespace of one API key's threads: a hash, so the key itself is never stored in a checkpoint."""
     return hashlib.sha256(api_key.encode()).hexdigest()[:16]
@@ -41,8 +37,15 @@ def thread_owner(api_key: str) -> str:
 def create_app(settings: Settings | None = None, service: AgentService | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
+
+    def rate_key(request: Request) -> str:
+        # Auth runs first, so with keys configured the header is a valid key. In open mode it is any text
+        # the client likes, and keying on it would give every made-up value a fresh allowance.
+        key = request.headers.get("X-API-Key")
+        return key if settings.api_keys and key else get_remote_address(request)
+
     # Only the chat endpoints are limited; health and metrics must stay reachable for probes.
-    limiter = Limiter(key_func=_key_or_ip)
+    limiter = Limiter(key_func=rate_key)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
