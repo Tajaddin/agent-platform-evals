@@ -36,6 +36,8 @@ class AgentService:
             settings.allowed_schemas,
             settings.row_limit,
             settings.query_timeout_seconds,
+            threads=settings.query_threads,
+            memory_limit=settings.query_memory_limit,
         )
         self.planner = planner or planner_from_settings(settings)
         self._pool: ConnectionPool[Any] | None = None

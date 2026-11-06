@@ -19,7 +19,10 @@ Three independent layers (`guard.py`, `warehouse.py`):
    added or lowered to the configured cap on the outermost query.
 2. **The connection cannot do damage anyway.** DuckDB is opened `read_only=True`, one connection per
    query, with a wall-clock timeout enforced by `connection.interrupt()` from a timer thread and a fetch
-   cap of `row_limit + 1` so truncation is detected and reported.
+   cap of `row_limit + 1` so truncation is detected and reported. Each connection is opened with
+   `threads` and `memory_limit` set (`AGENT_QUERY_THREADS`, `AGENT_QUERY_MEMORY_LIMIT`: 2 and 512 MiB)
+   instead of DuckDB's defaults of every core and 80% of RAM, so a query that slips through cannot starve
+   the API process or the host while the timeout runs.
 3. **Expensive is a human decision.** The guard estimates the scan from DuckDB's optimised plan
    (`EXPLAIN (FORMAT JSON)`) and the row counts of every table reference (a self-join counts twice). The
    graph interrupts when a join without an equality condition would compare more than

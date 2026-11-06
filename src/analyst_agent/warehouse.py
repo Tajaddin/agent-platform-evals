@@ -63,10 +63,21 @@ TABLE_DESCRIPTIONS = {
 
 
 class Warehouse:
-    """A DuckDB file opened read-only. One connection per call keeps threads and asyncio simple."""
+    """A DuckDB file opened read-only. One connection per call keeps threads and asyncio simple.
+
+    `threads` and `memory_limit` cap what queries can take from the host; DuckDB's defaults are every core
+    and 80% of RAM.
+    """
 
     def __init__(
-        self, path: Path, allowed_schemas: list[str], row_limit: int, timeout_seconds: float
+        self,
+        path: Path,
+        allowed_schemas: list[str],
+        row_limit: int,
+        timeout_seconds: float,
+        *,
+        threads: int = 2,
+        memory_limit: str = "512MiB",
     ) -> None:
         if not Path(path).exists():
             raise FileNotFoundError(
@@ -76,10 +87,16 @@ class Warehouse:
         self.allowed_schemas = allowed_schemas
         self.row_limit = row_limit
         self.timeout_seconds = timeout_seconds
+        self.threads = threads
+        self.memory_limit = memory_limit
         self._tables: list[TableInfo] | None = None
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.path), read_only=True)
+        return duckdb.connect(
+            str(self.path),
+            read_only=True,
+            config={"threads": self.threads, "memory_limit": self.memory_limit},
+        )
 
     def tables(self) -> list[TableInfo]:
         if self._tables is None:

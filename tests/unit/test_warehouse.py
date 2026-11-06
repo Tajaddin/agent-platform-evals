@@ -112,6 +112,12 @@ def test_guard_passes_date_bounded_queries(wh: Warehouse, sql: str) -> None:
     assert d.allowed and not d.needs_approval, d.reason
 
 
+def test_connections_cap_threads_and_memory(warehouse_path: Path) -> None:
+    capped = Warehouse(warehouse_path, ["main_marts"], 10, 20.0, threads=1, memory_limit="256MiB")
+    r = capped.run("select current_setting('threads') as t, current_setting('memory_limit') as m")
+    assert r.rows == [[1, "256.0 MiB"]]
+
+
 def test_guard_rejects_and_explains(wh: Warehouse) -> None:
     d = wh.guard("delete from main_marts.dim_station", 100_000)
     assert not d.allowed

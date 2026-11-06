@@ -99,6 +99,13 @@ def test_lower_threshold_setting_changes_approval(settings: Settings, golden: di
     assert svc.chat("t10", FL).status == "approval_required"
 
 
+def test_query_resource_caps_come_from_settings(settings: Settings, golden: dict[str, GoldenEntry]) -> None:
+    capped = settings.model_copy(update={"query_threads": 1, "query_memory_limit": "256MiB"})
+    svc = AgentService(capped, planner=FakePlanner(golden=golden))
+    r = svc.warehouse.run("select current_setting('threads') as t, current_setting('memory_limit') as m")
+    assert r.rows == [[1, "256.0 MiB"]]
+
+
 @dataclass
 class ScriptedPlanner(FakePlanner):
     """A fake planner whose plan() follows a script, to drive the repair and reflection loops."""
