@@ -146,7 +146,9 @@ SELF_JOIN = "select count(*) from main_marts.fct_station_day a join main_marts.f
 def test_guard_requires_approval_for_a_join_that_can_return_more_rows_than_the_threshold(
     wh: Warehouse, sql: str, reason: str
 ) -> None:
-    # Every reference has a real date range; each of these ran into the 20 s timeout without approval.
+    # Every reference has a real date range and none of these needed approval. Run without the guard, the
+    # first was cut off by the 20 s timeout, the second returned 15.9M rows in 0.1 s and the obs_date
+    # equality join returned 4.1e9 rows in about 15 s.
     d = wh.guard(sql, 100_000)
     assert d.allowed and d.needs_approval, d.reason
     assert reason in d.reason
