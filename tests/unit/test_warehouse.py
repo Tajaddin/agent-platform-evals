@@ -72,7 +72,6 @@ def test_guard_requires_approval_for_a_self_join_with_ranges_that_cover_all_the_
         100_000,
     )
     assert d.allowed and d.needs_approval
-    assert "no date range on main_marts.fct_station_day" in d.reason
 
 
 @pytest.mark.parametrize(
@@ -117,6 +116,40 @@ def test_guard_requires_approval_for_a_pairwise_join_even_when_dates_are_bounded
     )
     assert d.allowed and d.needs_approval
     assert "pairs" in d.reason
+
+
+SELF_JOIN = "select count(*) from main_marts.fct_station_day a join main_marts.fct_station_day b on "
+
+
+@pytest.mark.parametrize(
+    ("sql", "reason"),
+    [
+        # range joins (IE_JOIN, PIECEWISE_MERGE_JOIN) can return every pair of rows
+        (
+            SELF_JOIN + "a.obs_date < b.obs_date and a.tmax_c > b.tmax_c "
+            "where a.obs_date > date '2026-10-03' and b.obs_date > date '2026-10-03'",
+            "row pairs",
+        ),
+        (
+            SELF_JOIN + "a.tmax_c < b.tmax_c "
+            "where a.obs_date = date '2026-10-10' and b.obs_date = date '2026-10-10'",
+            "row pairs",
+        ),
+        # an equality join on a column with few distinct values
+        (
+            SELF_JOIN + "a.obs_date = b.obs_date "
+            "where a.obs_date > date '2026-10-03' and b.obs_date > date '2026-10-03'",
+            "a join returns about 165,776,533 rows",
+        ),
+    ],
+)
+def test_guard_requires_approval_for_a_join_that_can_return_more_rows_than_the_threshold(
+    wh: Warehouse, sql: str, reason: str
+) -> None:
+    # Every reference has a real date range; each of these ran into the 20 s timeout without approval.
+    d = wh.guard(sql, 100_000)
+    assert d.allowed and d.needs_approval, d.reason
+    assert reason in d.reason
 
 
 @pytest.mark.parametrize(

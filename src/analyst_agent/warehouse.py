@@ -155,10 +155,11 @@ class Warehouse:
     def guard(self, sql: str, approval_row_threshold: int) -> GuardDecision:
         """Allow or reject the SQL, and decide whether it needs a human's approval.
 
-        Approval is needed when a pairwise join (no equality condition) would compare more row pairs than
-        the threshold, or when the estimated scan exceeds the threshold and some reference to a table larger
-        than the threshold lacks a real date range: a constant bound on a date column that leaves out some
-        of the table's dates, and that the optimiser kept as a filter on that table's scan.
+        Approval is needed when a pairwise join (no equality condition) could return more row pairs than
+        the threshold, when the optimiser estimates that any join returns more rows than the threshold, or
+        when the estimated scan exceeds the threshold and some reference to a table larger than the
+        threshold lacks a real date range: a constant bound on a date column that leaves out some of the
+        table's dates, and that the optimiser kept as a filter on that table's scan.
         """
         outcome: GuardOutcome = check_sql(sql, self.allowed_schemas, self.allowed_tables(), self.row_limit)
         if not outcome.allowed:
@@ -183,7 +184,10 @@ class Warehouse:
         date_bounded = not unbounded and any(ranged)
         if plan.pairs > approval_row_threshold:
             needs_approval = True
-            reason = f"a join without an equality condition compares about {plan.pairs:,} row pairs"
+            reason = f"a join without an equality condition can return about {plan.pairs:,} row pairs"
+        elif plan.joined > approval_row_threshold:
+            needs_approval = True
+            reason = f"a join returns about {plan.joined:,} rows"
         elif estimated > approval_row_threshold and not date_bounded:
             needs_approval = True
             on = ", ".join(unbounded) or "any table"

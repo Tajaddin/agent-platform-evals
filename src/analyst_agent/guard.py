@@ -7,8 +7,8 @@ Rules (all enforced by parsing, not by string matching):
 - no ATTACH, COPY, PRAGMA or other commands;
 - a LIMIT is enforced (added when missing, lowered when too high).
 For the approval gate it also lists the constant date bounds on each table reference, and reads DuckDB's
-optimised plan for cardinalities, joins that compare every pair of rows, and the filters each table scan
-kept.
+optimised plan for cardinalities, joins that can return every pair of rows, and the filters each table
+scan kept.
 """
 
 from __future__ import annotations
@@ -228,8 +228,9 @@ def date_bounds(
     return out
 
 
-# Joins with no equality condition: DuckDB compares every pair of input rows.
-PAIRWISE_JOINS = {"CROSS_PRODUCT", "NESTED_LOOP_JOIN", "BLOCKWISE_NL_JOIN"}
+# Joins with no equality condition. A cross product or nested loop compares every pair of input rows; a
+# range join (only inequalities: IE_JOIN, PIECEWISE_MERGE_JOIN) can return every pair.
+PAIRWISE_JOINS = {"CROSS_PRODUCT", "NESTED_LOOP_JOIN", "BLOCKWISE_NL_JOIN", "IE_JOIN", "PIECEWISE_MERGE_JOIN"}
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,7 @@ class PlanEstimate:
 
     rows: int = 0  # largest estimated cardinality of any operator
     pairs: int = 0  # largest input product of a pairwise join
+    joined: int = 0  # largest estimated cardinality of any join
     scans: tuple[tuple[str, str], ...] = ()  # (schema.table, filters) of every table scan
 
     def filtered_scans(self, table: str, columns: set[str]) -> int:
@@ -254,11 +256,11 @@ class PlanEstimate:
 
 
 def plan_estimate(plan: list[dict[str, Any]]) -> PlanEstimate:
-    rows = pairs = 0
+    rows = pairs = joined = 0
     scans: list[tuple[str, str]] = []
 
     def walk(node: dict[str, Any]) -> int:
-        nonlocal rows, pairs
+        nonlocal rows, pairs, joined
         inputs = [walk(child) for child in node.get("children", [])]
         info = node.get("extra_info") or {}
         name = node.get("name")
@@ -277,9 +279,11 @@ def plan_estimate(plan: list[dict[str, Any]]) -> PlanEstimate:
             filters = info.get("Filters", "")
             text = " AND ".join(filters) if isinstance(filters, list) else str(filters)
             scans.append((".".join(info["Table"].lower().split(".")[-2:]), text))
+        if name in PAIRWISE_JOINS or str(name).endswith("_JOIN"):
+            joined = max(joined, card)
         rows = max(rows, card)
         return card
 
     for root in plan:
         walk(root)
-    return PlanEstimate(rows=rows, pairs=pairs, scans=tuple(scans))
+    return PlanEstimate(rows=rows, pairs=pairs, joined=joined, scans=tuple(scans))

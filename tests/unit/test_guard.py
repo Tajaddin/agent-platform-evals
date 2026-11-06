@@ -191,3 +191,17 @@ def test_plan_estimate_counts_a_one_row_aggregate_as_one_row() -> None:
         }
     ]
     assert (plan_estimate(hash_join).pairs, plan_estimate(hash_join).rows) == (0, 5_000)
+    assert plan_estimate(hash_join).joined == 40
+
+
+@pytest.mark.parametrize("join", ["IE_JOIN", "PIECEWISE_MERGE_JOIN"])
+def test_plan_estimate_counts_range_joins_as_pairwise(join: str) -> None:
+    plan = [
+        {
+            "name": join,
+            "extra_info": {"Estimated Cardinality": "900"},
+            "children": [_scan("fct_station_day", 1_000), _scan("fct_station_day", 2_000)],
+        }
+    ]
+    est = plan_estimate(plan)
+    assert (est.pairs, est.joined, est.rows) == (2_000_000, 900, 2_000)

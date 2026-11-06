@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     # DuckDB's own defaults are every core and 80% of RAM; queries get this much instead.
     query_threads: int = 2
     query_memory_limit: str = "512MiB"
-    # Human-in-the-loop: a query whose estimated scan exceeds this many rows without a date range on every
-    # large table, or whose cross join compares more row pairs than this, pauses until someone approves it.
+    # Human-in-the-loop: a query pauses until someone approves it when a join can return more rows than this
+    # (a join without an equality condition is judged by the product of its inputs, whatever its filters),
+    # or when its estimated scan exceeds this many rows without a date range on every large table.
     approval_row_threshold: int = 100_000
 
     # API

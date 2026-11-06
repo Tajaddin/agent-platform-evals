@@ -25,8 +25,10 @@ Three independent layers (`guard.py`, `warehouse.py`):
    the API process or the host while the timeout runs.
 3. **Expensive is a human decision.** The guard estimates the scan from DuckDB's optimised plan
    (`EXPLAIN (FORMAT JSON)`) and the row counts of every table reference (a self-join counts twice). The
-   graph interrupts when a join without an equality condition would compare more than
-   `approval_row_threshold` (100,000) row pairs, whatever its filters, or when the scan estimate is above
+   graph interrupts when a join without an equality condition (a cross product, a nested loop, or a range
+   join such as `a.obs_date < b.obs_date`) could return more than `approval_row_threshold` (100,000) row
+   pairs, whatever its filters; when the optimiser estimates that any join returns more rows than the
+   threshold (an equality join on a column with few distinct values); or when the scan estimate is above
    the threshold and some reference to a table larger than the threshold has no real date range: a
    constant bound (`=`, `IN`, `BETWEEN`, `<`, `>`) on a date column, AND-ed into that reference's own
    `WHERE` or `ON`, that is false at the column's earliest or latest value, and that the optimiser kept as
