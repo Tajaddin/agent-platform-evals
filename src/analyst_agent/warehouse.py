@@ -37,7 +37,8 @@ class TableInfo:
     columns: list[ColumnInfo]
     row_count: int
     description: str = ""
-    date_ranges: dict[str, tuple[Any, Any]] = field(default_factory=dict)  # date column -> (min, max)
+    # date column -> its earliest and latest value, as DuckDB writes them in text
+    date_ranges: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
 
 TABLE_DESCRIPTIONS = {
@@ -117,7 +118,7 @@ class Warehouse:
                         [schema, name],
                     ).fetchall()
                     dated = [c for c, _ in cols if is_date_column(c)]
-                    ranges = "".join(f', min("{c}"), max("{c}")' for c in dated)
+                    ranges = "".join(f', min("{c}")::varchar, max("{c}")::varchar' for c in dated)
                     stats = con.execute(f'select count(*){ranges} from "{schema}"."{name}"').fetchone()
                     assert stats is not None  # an aggregate without GROUP BY returns one row
                     out.append(
@@ -245,13 +246,18 @@ class Warehouse:
 
 
 def _leaves_out_data(con: duckdb.DuckDBPyConnection, table: TableInfo, bound: DateBound) -> bool:
+    # Literals, not parameters: a parameterised statement costs DuckDB's Python client about 8 ms, a literal
+    # one well under 1 ms.
     kind = next(c.type for c in table.columns if c.name.lower() == bound.column)
+    ends = ", ".join(f"(cast({_literal(v)} as {kind}))" for v in table.date_ranges[bound.column])
     held = con.execute(
-        f"select bool_and(coalesce({bound.predicate}, false)) "
-        f"from (values (cast(? as {kind})), (cast(? as {kind}))) as ends(v)",
-        list(table.date_ranges[bound.column]),
+        f"select bool_and(coalesce({bound.predicate}, false)) from (values {ends}) as ends(v)"
     ).fetchone()
     return not (held and held[0])
+
+
+def _literal(text: str | None) -> str:
+    return "null" if text is None else "'" + text.replace("'", "''") + "'"
 
 
 def _jsonable(v: Any) -> Any:
