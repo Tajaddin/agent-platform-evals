@@ -29,8 +29,12 @@ class Settings(BaseSettings):
     allowed_schemas: list[str] = Field(default_factory=lambda: ["main_marts", "marts"])
     row_limit: int = 200
     query_timeout_seconds: float = 20.0
-    # Human-in-the-loop: a query whose estimated scan exceeds this many rows and has no date filter
-    # pauses the graph until someone approves it.
+    # DuckDB's own defaults are every core and 80% of RAM; queries get this much instead.
+    query_threads: int = 2
+    query_memory_limit: str = "512MiB"
+    # Human-in-the-loop: a query pauses until someone approves it when a join can return more rows than this
+    # (a join without an equality condition is judged by the product of its inputs, whatever its filters),
+    # or when its estimated scan exceeds this many rows without a date range on every large table.
     approval_row_threshold: int = 100_000
 
     # API

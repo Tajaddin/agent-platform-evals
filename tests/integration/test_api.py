@@ -16,11 +16,23 @@ from analyst_agent.service import AgentService
 HEADERS = {"X-API-Key": "test-key"}
 FL = "How many stations are in Florida?"
 TOTAL = "How many station-day rows are there in total?"
+FIRST = "Which state had the highest average maximum temperature on 2026-10-12?"
+FOLLOW = "And the lowest?"
+KEY_A = {"X-API-Key": "key-a"}
+KEY_B = {"X-API-Key": "key-b"}
 
 
 @pytest.fixture
 def client(settings: Settings, service: AgentService) -> Iterator[TestClient]:
     with TestClient(create_app(settings, service)) as c:
+        yield c
+
+
+@pytest.fixture
+def two_keys(settings: Settings, golden: dict[str, GoldenEntry]) -> Iterator[TestClient]:
+    both = settings.model_copy(update={"api_keys": ["key-a", "key-b"]})
+    svc = AgentService(both, planner=FakePlanner(golden=golden))
+    with TestClient(create_app(both, svc)) as c:
         yield c
 
 
@@ -70,6 +82,39 @@ def test_approval_flow_over_http(client: TestClient) -> None:
     assert final["status"] == "answered" and final["result"]["rows"] == [[232116]]
 
 
+def test_another_key_cannot_read_a_thread(two_keys: TestClient) -> None:
+    body = {"thread_id": "shared", "message": FIRST}
+    assert two_keys.post("/v1/chat", json=body, headers=KEY_B).json()["status"] == "answered"
+    assert len(two_keys.get("/v1/threads/shared", headers=KEY_B).json()["history"]) == 2
+    assert two_keys.get("/v1/threads/shared", headers=KEY_A).json()["history"] == []
+
+
+def _status(c: TestClient, body: dict, headers: dict, stream: bool) -> str:
+    if not stream:
+        return c.post("/v1/chat", json=body, headers=headers).json()["status"]
+    with c.stream("POST", "/v1/chat/stream", json=body, headers=headers) as r:
+        return _sse("".join(r.iter_text()))[-1][1]["status"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_another_key_cannot_continue_a_thread(two_keys: TestClient, stream: bool) -> None:
+    assert _status(two_keys, {"thread_id": "shared", "message": FIRST}, KEY_B, stream) == "answered"
+    follow = {"thread_id": "shared", "message": FOLLOW}
+    # The follow-up is only answerable with the earlier turn in memory; key A must not see key B's turn.
+    assert _status(two_keys, follow, KEY_A, stream) == "clarify"
+    assert len(two_keys.get("/v1/threads/shared", headers=KEY_B).json()["history"]) == 2
+    assert _status(two_keys, follow, KEY_B, stream) == "answered"
+
+
+def test_another_key_cannot_approve_a_thread(two_keys: TestClient) -> None:
+    first = two_keys.post("/v1/chat", json={"thread_id": "pending", "message": TOTAL}, headers=KEY_B).json()
+    assert first["status"] == "approval_required"
+    other = two_keys.post("/v1/threads/pending/approve", json={"approved": True}, headers=KEY_A)
+    assert other.status_code == 409
+    final = two_keys.post("/v1/threads/pending/approve", json={"approved": True}, headers=KEY_B)
+    assert final.status_code == 200 and final.json()["status"] == "answered"
+
+
 def _sse(text: str) -> list[tuple[str, dict]]:
     events = []
     for block in text.replace("\r\n", "\n").strip().split("\n\n"):  # sse-starlette emits CRLF
@@ -107,6 +152,23 @@ def test_rate_limit(settings: Settings, golden: dict[str, GoldenEntry]) -> None:
         ]
     assert codes == [200, 200, 429]
     assert c.get("/healthz").status_code == 200  # probes are never limited
+
+
+def test_open_mode_rate_limits_by_client_not_by_header(
+    settings: Settings, golden: dict[str, GoldenEntry]
+) -> None:
+    open_tight = settings.model_copy(update={"api_keys": [], "rate_limit": "2/minute"})
+    svc = AgentService(open_tight, planner=FakePlanner(golden=golden))
+    with TestClient(create_app(open_tight, svc)) as c:
+        codes = [
+            c.post(
+                "/v1/chat",
+                json={"thread_id": "rl", "message": "Hello"},
+                headers={"X-API-Key": f"made-up-{i}"},
+            ).status_code
+            for i in range(3)
+        ]
+    assert codes == [200, 200, 429]
 
 
 def test_open_mode_when_no_keys_configured(settings: Settings, golden: dict[str, GoldenEntry]) -> None:

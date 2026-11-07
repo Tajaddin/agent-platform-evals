@@ -1,7 +1,9 @@
 # Local stack. `docker compose up -d api postgres` is the agent with Postgres memory;
 # `--profile observability` adds traces (OTel collector -> Tempo), metrics (Prometheus, Alertmanager) and
 # Grafana with the provisioned dashboard; `--profile load` adds the k6 load test.
-# Secrets come from .env (copy .env.example). Nothing here is exposed beyond localhost.
+# Secrets come from .env (copy .env.example); compose refuses to start until POSTGRES_PASSWORD and
+# GRAFANA_ADMIN_PASSWORD are set. Every published port is bound to 127.0.0.1, so nothing is reachable
+# from other hosts.
 
 name: analyst-agent
 
@@ -11,9 +13,9 @@ services:
     image: analyst-agent:local
     env_file: .env
     environment:
-      AGENT_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD:-change-me}@postgres:5432/agent
+      AGENT_DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agent
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -23,12 +25,12 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: agent
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: agent
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
       interval: 5s
@@ -51,7 +53,7 @@ services:
       - ./observability/tempo.yaml:/etc/tempo.yaml:ro
       - tempo-data:/var/tempo
     ports:
-      - "${TEMPO_PORT:-3200}:3200"
+      - "127.0.0.1:${TEMPO_PORT:-3200}:3200"
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -64,7 +66,7 @@ services:
       - ./observability/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
 
   alertmanager:
     image: prom/alertmanager:v0.28.1
@@ -72,14 +74,14 @@ services:
     volumes:
       - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     ports:
-      - "${ALERTMANAGER_PORT:-9093}:9093"
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
 
   grafana:
     image: grafana/grafana:12.1.1
     profiles: [observability]
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
@@ -87,7 +89,7 @@ services:
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     depends_on: [prometheus, tempo]
 
   k6:
@@ -96,7 +98,7 @@ services:
     command: ["run", "/scripts/k6-chat.js"]
     environment:
       BASE_URL: http://api:8000
-      API_KEY: ${K6_API_KEY:-change-me-local-key}
+      API_KEY: ${K6_API_KEY:-}
       VUS: ${K6_VUS:-10}
       DURATION: ${K6_DURATION:-60s}
     volumes:

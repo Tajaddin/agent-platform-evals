@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,15 +29,23 @@ log = get_logger("analyst_agent.api")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def _key_or_ip(request: Request) -> str:
-    return request.headers.get("X-API-Key") or get_remote_address(request)
+def thread_owner(api_key: str) -> str:
+    """The namespace of one API key's threads: a hash, so the key itself is never stored in a checkpoint."""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:16]
 
 
 def create_app(settings: Settings | None = None, service: AgentService | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
+
+    def rate_key(request: Request) -> str:
+        # Auth runs first, so with keys configured the header is a valid key. In open mode it is any text
+        # the client likes, and keying on it would give every made-up value a fresh allowance.
+        key = request.headers.get("X-API-Key")
+        return key if settings.api_keys and key else get_remote_address(request)
+
     # Only the chat endpoints are limited; health and metrics must stay reachable for probes.
-    limiter = Limiter(key_func=_key_or_ip)
+    limiter = Limiter(key_func=rate_key)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -57,9 +66,13 @@ def create_app(settings: Settings | None = None, service: AgentService | None = 
         )
     FastAPIInstrumentor.instrument_app(app, excluded_urls="healthz,readyz,metrics")
 
-    def require_key(key: str | None = Security(api_key_header)) -> None:
-        if settings.api_keys and key not in settings.api_keys:
+    def caller(key: str | None = Security(api_key_header)) -> str:
+        """Authenticate and return the caller's thread namespace ("" in open mode, where all share one)."""
+        if not settings.api_keys:
+            return ""
+        if key is None or key not in settings.api_keys:
             raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+        return thread_owner(key)
 
     def svc(request: Request) -> AgentService:
         return request.app.state.service  # type: ignore[no-any-return]
@@ -80,18 +93,20 @@ def create_app(settings: Settings | None = None, service: AgentService | None = 
     def metrics_endpoint() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_key)])
+    @app.post("/v1/chat", response_model=ChatResponse)
     @limiter.limit(settings.rate_limit)
-    async def chat(request: Request, body: ChatRequest) -> ChatResponse:
-        return await run_in_threadpool(svc(request).chat, body.thread_id, body.message)
+    async def chat(request: Request, body: ChatRequest, owner: str = Depends(caller)) -> ChatResponse:
+        return await run_in_threadpool(svc(request).chat, body.thread_id, body.message, owner=owner)
 
-    @app.post("/v1/chat/stream", dependencies=[Depends(require_key)])
+    @app.post("/v1/chat/stream")
     @limiter.limit(settings.rate_limit)
-    async def chat_stream(request: Request, body: ChatRequest) -> EventSourceResponse:
+    async def chat_stream(
+        request: Request, body: ChatRequest, owner: str = Depends(caller)
+    ) -> EventSourceResponse:
         service = svc(request)
 
         async def gen() -> AsyncIterator[dict[str, Any]]:
-            it = service.stream(body.thread_id, body.message)
+            it = service.stream(body.thread_id, body.message, owner=owner)
             while True:
                 item = await run_in_threadpool(next, it, None)
                 if item is None:
@@ -100,18 +115,18 @@ def create_app(settings: Settings | None = None, service: AgentService | None = 
 
         return EventSourceResponse(gen())
 
-    @app.post(
-        "/v1/threads/{thread_id}/approve", response_model=ChatResponse, dependencies=[Depends(require_key)]
-    )
+    @app.post("/v1/threads/{thread_id}/approve", response_model=ChatResponse)
     @limiter.limit(settings.rate_limit)
-    async def approve(request: Request, thread_id: str, body: ApprovalRequest) -> ChatResponse:
+    async def approve(
+        request: Request, thread_id: str, body: ApprovalRequest, owner: str = Depends(caller)
+    ) -> ChatResponse:
         try:
-            return await run_in_threadpool(svc(request).approve, thread_id, body.approved)
+            return await run_in_threadpool(svc(request).approve, thread_id, body.approved, owner=owner)
         except LookupError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get("/v1/threads/{thread_id}", dependencies=[Depends(require_key)])
-    def thread(request: Request, thread_id: str) -> dict[str, Any]:
-        return {"thread_id": thread_id, "history": svc(request).thread_history(thread_id)}
+    @app.get("/v1/threads/{thread_id}")
+    def thread(request: Request, thread_id: str, owner: str = Depends(caller)) -> dict[str, Any]:
+        return {"thread_id": thread_id, "history": svc(request).thread_history(thread_id, owner=owner)}
 
     return app

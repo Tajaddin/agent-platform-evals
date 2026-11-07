@@ -36,6 +36,8 @@ class AgentService:
             settings.allowed_schemas,
             settings.row_limit,
             settings.query_timeout_seconds,
+            threads=settings.query_threads,
+            memory_limit=settings.query_memory_limit,
         )
         self.planner = planner or planner_from_settings(settings)
         self._pool: ConnectionPool[Any] | None = None
@@ -76,8 +78,11 @@ class AgentService:
 
     # ------------------------------------------------------------------ turns
 
-    def _config(self, thread_id: str) -> RunnableConfig:
-        return {"configurable": {"thread_id": thread_id}, "recursion_limit": 40}
+    def _config(self, thread_id: str, owner: str) -> RunnableConfig:
+        # Clients choose thread ids, so each owner (API key) gets its own namespace of them. "/" cannot
+        # occur in an API thread id, so a scoped key never equals an unscoped one.
+        key = f"{owner}/{thread_id}" if owner else thread_id
+        return {"configurable": {"thread_id": key}, "recursion_limit": 40}
 
     def _response(
         self, thread_id: str, state: dict[str, Any], t0: float, interrupted: dict[str, Any] | None
@@ -127,8 +132,8 @@ class AgentService:
         )
         return resp
 
-    def _interrupt_payload(self, thread_id: str) -> dict[str, Any] | None:
-        snapshot = self.graph.get_state(self._config(thread_id))
+    def _interrupt_payload(self, config: RunnableConfig) -> dict[str, Any] | None:
+        snapshot = self.graph.get_state(config)
         for task in snapshot.tasks:
             for intr in getattr(task, "interrupts", ()):
                 value = getattr(intr, "value", None)
@@ -136,33 +141,34 @@ class AgentService:
                     return value
         return None
 
-    def chat(self, thread_id: str, message: str) -> ChatResponse:
+    def chat(self, thread_id: str, message: str, *, owner: str = "") -> ChatResponse:
         t0 = time.time()
+        config = self._config(thread_id, owner)
         with span("agent.turn", thread_id=thread_id):
-            self.graph.invoke(new_turn_input(message), self._config(thread_id))
-            state = self.graph.get_state(self._config(thread_id)).values
-            return self._response(thread_id, state, t0, self._interrupt_payload(thread_id))
+            self.graph.invoke(new_turn_input(message), config)
+            state = self.graph.get_state(config).values
+            return self._response(thread_id, state, t0, self._interrupt_payload(config))
 
-    def approve(self, thread_id: str, approved: bool) -> ChatResponse:
+    def approve(self, thread_id: str, approved: bool, *, owner: str = "") -> ChatResponse:
         t0 = time.time()
-        if self._interrupt_payload(thread_id) is None:
+        config = self._config(thread_id, owner)
+        if self._interrupt_payload(config) is None:
             raise LookupError("nothing is waiting for approval on this thread")
         with span("agent.approve", thread_id=thread_id, approved=approved):
-            self.graph.invoke(Command(resume=approved), self._config(thread_id))
-            state = self.graph.get_state(self._config(thread_id)).values
-            return self._response(thread_id, state, t0, self._interrupt_payload(thread_id))
+            self.graph.invoke(Command(resume=approved), config)
+            state = self.graph.get_state(config).values
+            return self._response(thread_id, state, t0, self._interrupt_payload(config))
 
-    def stream(self, thread_id: str, message: str) -> Iterator[dict[str, Any]]:
+    def stream(self, thread_id: str, message: str, *, owner: str = "") -> Iterator[dict[str, Any]]:
         """Yield events while the graph runs: node starts, synthesizer tokens, then the final response."""
         t0 = time.time()
+        config = self._config(thread_id, owner)
         q: queue.Queue[dict[str, Any] | None] = queue.Queue()
         modes: list[StreamMode] = ["custom", "updates"]
 
         def run() -> None:
             try:
-                for mode, chunk in self.graph.stream(
-                    new_turn_input(message), self._config(thread_id), stream_mode=modes
-                ):
+                for mode, chunk in self.graph.stream(new_turn_input(message), config, stream_mode=modes):
                     if mode == "custom" and isinstance(chunk, dict):
                         q.put({"event": "token", "data": chunk})
                     elif mode == "updates" and isinstance(chunk, dict):
@@ -180,10 +186,10 @@ class AgentService:
             if item is None:
                 break
             yield item
-        state = self.graph.get_state(self._config(thread_id)).values
-        final = self._response(thread_id, state, t0, self._interrupt_payload(thread_id))
+        state = self.graph.get_state(config).values
+        final = self._response(thread_id, state, t0, self._interrupt_payload(config))
         yield {"event": "done", "data": final.model_dump()}
 
-    def thread_history(self, thread_id: str) -> list[dict[str, str]]:
-        state = self.graph.get_state(self._config(thread_id)).values
+    def thread_history(self, thread_id: str, *, owner: str = "") -> list[dict[str, str]]:
+        state = self.graph.get_state(self._config(thread_id, owner)).values
         return list(state.get("history", [])) if state else []

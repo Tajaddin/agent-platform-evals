@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-from analyst_agent.guard import GuardOutcome, check_sql, estimated_rows_from_explain, has_date_filter
+from analyst_agent.guard import (
+    DateBound,
+    GuardOutcome,
+    PlanEstimate,
+    check_sql,
+    date_bounds,
+    is_date_column,
+    plan_estimate,
+)
 from analyst_agent.schemas import GuardDecision, QueryResult
 
 
@@ -27,6 +37,8 @@ class TableInfo:
     columns: list[ColumnInfo]
     row_count: int
     description: str = ""
+    # date column -> its earliest and latest value, as DuckDB writes them in text
+    date_ranges: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
 
 TABLE_DESCRIPTIONS = {
@@ -54,10 +66,21 @@ TABLE_DESCRIPTIONS = {
 
 
 class Warehouse:
-    """A DuckDB file opened read-only. One connection per call keeps threads and asyncio simple."""
+    """A DuckDB file opened read-only. One connection per call keeps threads and asyncio simple.
+
+    `threads` and `memory_limit` cap what queries can take from the host; DuckDB's defaults are every core
+    and 80% of RAM.
+    """
 
     def __init__(
-        self, path: Path, allowed_schemas: list[str], row_limit: int, timeout_seconds: float
+        self,
+        path: Path,
+        allowed_schemas: list[str],
+        row_limit: int,
+        timeout_seconds: float,
+        *,
+        threads: int = 2,
+        memory_limit: str = "512MiB",
     ) -> None:
         if not Path(path).exists():
             raise FileNotFoundError(
@@ -67,10 +90,16 @@ class Warehouse:
         self.allowed_schemas = allowed_schemas
         self.row_limit = row_limit
         self.timeout_seconds = timeout_seconds
+        self.threads = threads
+        self.memory_limit = memory_limit
         self._tables: list[TableInfo] | None = None
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.path), read_only=True)
+        return duckdb.connect(
+            str(self.path),
+            read_only=True,
+            config={"threads": self.threads, "memory_limit": self.memory_limit},
+        )
 
     def tables(self) -> list[TableInfo]:
         if self._tables is None:
@@ -88,14 +117,20 @@ class Warehouse:
                         "where table_schema = ? and table_name = ? order by ordinal_position",
                         [schema, name],
                     ).fetchall()
-                    count = con.execute(f'select count(*) from "{schema}"."{name}"').fetchone()
+                    dated = [c for c, _ in cols if is_date_column(c)]
+                    ranges = "".join(f', min("{c}")::varchar, max("{c}")::varchar' for c in dated)
+                    stats = con.execute(f'select count(*){ranges} from "{schema}"."{name}"').fetchone()
+                    assert stats is not None  # an aggregate without GROUP BY returns one row
                     out.append(
                         TableInfo(
                             schema=schema,
                             name=name,
                             columns=[ColumnInfo(c, t) for c, t in cols],
-                            row_count=int(count[0]) if count else 0,
+                            row_count=int(stats[0]),
                             description=TABLE_DESCRIPTIONS.get(name, ""),
+                            date_ranges={
+                                c.lower(): (stats[1 + 2 * i], stats[2 + 2 * i]) for i, c in enumerate(dated)
+                            },
                         )
                     )
                 self._tables = out
@@ -118,18 +153,50 @@ class Warehouse:
         return "\n".join(lines)
 
     def guard(self, sql: str, approval_row_threshold: int) -> GuardDecision:
+        """Allow or reject the SQL, and decide whether it needs a human's approval.
+
+        Approval is needed when a pairwise join (no equality condition) could return more row pairs than
+        the threshold, when the optimiser estimates that any join returns more rows than the threshold, or
+        when the estimated scan exceeds the threshold and some reference to a table larger than the
+        threshold lacks a real date range: a constant bound on a date column that leaves out some of the
+        table's dates, and that the optimiser kept as a filter on that table's scan.
+        """
         outcome: GuardOutcome = check_sql(sql, self.allowed_schemas, self.allowed_tables(), self.row_limit)
         if not outcome.allowed:
             return GuardDecision(allowed=False, sql=outcome.sql, reason=outcome.reason)
-        # EXPLAIN alone under-reports (a bare count(*) becomes a statistics lookup), so the scan estimate
-        # is the larger of the plan's cardinality and the size of the tables the query touches.
-        estimated = max(self._estimate_rows(outcome.sql), self._table_rows(outcome.tables))
-        needs_approval = estimated > approval_row_threshold and not has_date_filter(outcome.sql)
-        reason = (
-            f"estimated scan of {estimated:,} rows with no date filter; needs approval"
-            if needs_approval
-            else f"ok; estimated scan {estimated:,} rows"
+        tables = {f"{t.schema}.{t.name}": t for t in self.tables()}
+        sizes = {name: t.row_count for name, t in tables.items()}
+        dates = {name: set(t.date_ranges) for name, t in tables.items()}
+        refs = date_bounds(outcome.sql, self.allowed_schemas, self.allowed_tables(), dates)
+        try:
+            plan, ranged = self._inspect(outcome.sql, [(tables[t], bounds) for t, bounds in refs])
+        except duckdb.Error as exc:  # it would fail to run too; the analyst gets the error to repair
+            reason = f"DuckDB cannot plan it: {str(exc)[:300]}"
+            return GuardDecision(allowed=False, sql=outcome.sql, reason=reason)
+        # EXPLAIN alone under-reports (a bare count(*) becomes a statistics lookup), so the scan estimate also
+        # counts every reference at its table's full size; a self-join counts twice.
+        estimated = max(plan.rows, plan.pairs, sum(sizes.get(t, 0) for t, _ in refs))
+        large = Counter(t for t, _ in refs if sizes.get(t, 0) > approval_row_threshold)
+        unbounded = sorted(
+            {t for (t, _), real in zip(refs, ranged, strict=True) if t in large and not real}
+            | {t for t, n in large.items() if plan.filtered_scans(t, dates.get(t, set())) < n}
         )
+        date_bounded = not unbounded and any(ranged)
+        if plan.pairs > approval_row_threshold:
+            needs_approval = True
+            reason = f"a join without an equality condition can return about {plan.pairs:,} row pairs"
+        elif plan.joined > approval_row_threshold:
+            needs_approval = True
+            reason = f"a join returns about {plan.joined:,} rows"
+        elif estimated > approval_row_threshold and not date_bounded:
+            needs_approval = True
+            on = ", ".join(unbounded) or "any table"
+            reason = f"estimated scan of {estimated:,} rows with no date range on {on}"
+        else:
+            needs_approval = False
+            reason = f"ok; estimated scan {estimated:,} rows"
+        if needs_approval:
+            reason += "; needs approval"
         return GuardDecision(
             allowed=True,
             sql=outcome.sql,
@@ -138,18 +205,22 @@ class Warehouse:
             needs_approval=needs_approval,
         )
 
-    def _table_rows(self, qualified_names: tuple[str, ...]) -> int:
-        sizes = {f"{t.schema}.{t.name}": t.row_count for t in self.tables()}
-        return sum(sizes.get(name, 0) for name in qualified_names)
+    def _inspect(
+        self, sql: str, refs: list[tuple[TableInfo, tuple[DateBound, ...]]]
+    ) -> tuple[PlanEstimate, list[bool]]:
+        """DuckDB's optimised plan, and for each reference whether one of its date bounds leaves out data.
 
-    def _estimate_rows(self, sql: str) -> int:
+        A bound leaves out data when it is false at the column's earliest or latest value. A bound is a
+        single range (an IN list is taken as the range it spans), so one that holds at both ends holds for
+        every row: `obs_date >= date '1900-01-01'` is no range. Raises duckdb.Error when DuckDB cannot plan
+        the query.
+        """
         con = self._connect()
         try:
-            plan = con.execute(f"EXPLAIN {sql}").fetchall()
-            text = "\n".join(str(part) for row in plan for part in row)
-            return estimated_rows_from_explain(text)
-        except duckdb.Error:
-            return 0
+            rows = con.execute(f"EXPLAIN (FORMAT JSON) {sql}").fetchall()
+            plan = plan_estimate([node for _, text in rows for node in json.loads(text)])
+            ranged = [any(_leaves_out_data(con, table, b) for b in bounds) for table, bounds in refs]
+            return plan, ranged
         finally:
             con.close()
 
@@ -176,6 +247,21 @@ class Warehouse:
             truncated=truncated,
             elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
         )
+
+
+def _leaves_out_data(con: duckdb.DuckDBPyConnection, table: TableInfo, bound: DateBound) -> bool:
+    # Literals, not parameters: a parameterised statement costs DuckDB's Python client about 8 ms, a literal
+    # one well under 1 ms.
+    kind = next(c.type for c in table.columns if c.name.lower() == bound.column)
+    ends = ", ".join(f"(cast({_literal(v)} as {kind}))" for v in table.date_ranges[bound.column])
+    held = con.execute(
+        f"select bool_and(coalesce({bound.predicate}, false)) from (values {ends}) as ends(v)"
+    ).fetchone()
+    return not (held and held[0])
+
+
+def _literal(text: str | None) -> str:
+    return "null" if text is None else "'" + text.replace("'", "''") + "'"
 
 
 def _jsonable(v: Any) -> Any:

@@ -18,7 +18,7 @@ flowchart LR
     S -->|clarify / refuse / small talk| END1([response])
     A --> G[guard<br/>sqlglot allowlist, LIMIT, scan estimate]
     G -->|rejected, up to 2x| A
-    G -->|expensive, no date filter| H{{human approval<br/>LangGraph interrupt}}
+    G -->|expensive, no date range| H{{human approval<br/>LangGraph interrupt}}
     H -->|approved| X
     H -->|declined| END2([refused])
     G -->|ok| X[execute<br/>read-only DuckDB, timeout, row cap]
@@ -88,12 +88,15 @@ for the shipped image: a turn costs about 45 ms of Python CPU (sqlglot, LangGrap
 serialisation), so one process saturates near 20 turns/s and latency under 10 concurrent users is queueing.
 The deployment scales by adding ECS tasks rather than workers so that each task's Prometheus metrics stay
 whole (see limitations). Host: Windows 11, Docker Desktop, i7, 20 threads.
+These runs predate the DuckDB cap of 2 threads and 512 MiB (`AGENT_QUERY_THREADS`,
+`AGENT_QUERY_MEMORY_LIMIT`). DuckDB keeps one instance per file and configuration in a process, so the
+cap is shared by all of a worker's concurrent queries; the load table has not been re-measured with it.
 
 ### Tests and checks
 
 | Check | Count / result |
 |---|---|
-| Unit + integration tests (`make test`) | 74 passed, 88% line+branch coverage (CI floor 85%) |
+| Unit + integration tests (`make test`) | 124 passed, 93% line+branch coverage (CI floor 85%; re-run 2026-11-06) |
 | Postgres memory tests (`make test-pg`) | 2 passed against the compose database: history and a pending approval survive a process restart |
 | Alert rules (`make alerts-test`) | 5 rules, 7 promtool unit tests, all firing and silent as specified |
 | Static | ruff, ruff format, mypy `--strict` on the package, gitleaks, `terraform validate` |
@@ -110,8 +113,9 @@ uv run analyst-agent serve                           # http://localhost:8000/doc
 make test && make evals                              # the full local gate, no key needed
 ```
 
-With Docker: `make up` (API + Postgres), `make up-obs` (adds OTel collector, Tempo, Prometheus, Alertmanager,
-Grafana with the provisioned dashboard at http://localhost:3000), `make load`, `make down`.
+With Docker, after setting `POSTGRES_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` in `.env` (there are no defaults):
+`make up` (API + Postgres), `make up-obs` (adds OTel collector, Tempo, Prometheus, Alertmanager, Grafana with
+the provisioned dashboard at http://localhost:3000), `make load`, `make down`. Ports bind to 127.0.0.1 only.
 See [docs/DEPLOY.md](docs/DEPLOY.md) for AWS.
 
 Real models: `AGENT_PROVIDER=anthropic` with `ANTHROPIC_API_KEY`, or `AGENT_PROVIDER=bedrock` with AWS
@@ -130,7 +134,12 @@ API keys are all settings (`src/analyst_agent/config.py`, `AGENT_*` variables).
 | `GET /metrics` | Prometheus exposition |
 
 Authentication is `X-API-Key` (any of `AGENT_API_KEYS`; an empty list means open, for local use only).
-The chat endpoints are rate limited per key (`AGENT_RATE_LIMIT`, default 30/minute); probes are not.
+Threads belong to the key that created them: the checkpoint key is a hash of the API key plus the client's
+`thread_id`, so the same `thread_id` under two keys is two threads, and no key can read, continue or approve
+another key's thread. Rotating or removing a key therefore starts a fresh namespace: its old threads and
+pending approvals are no longer reachable.
+The chat endpoints are rate limited per key, or per client IP in open mode (`AGENT_RATE_LIMIT`, default
+30/minute); probes are not.
 Statuses: `answered`, `clarify`, `refused`, `approval_required`, `error`.
 
 ## Evaluations

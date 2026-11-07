@@ -51,7 +51,14 @@ def schema() -> None:
     from analyst_agent.warehouse import Warehouse
 
     s = get_settings()
-    wh = Warehouse(s.warehouse_path, s.allowed_schemas, s.row_limit, s.query_timeout_seconds)
+    wh = Warehouse(
+        s.warehouse_path,
+        s.allowed_schemas,
+        s.row_limit,
+        s.query_timeout_seconds,
+        threads=s.query_threads,
+        memory_limit=s.query_memory_limit,
+    )
     typer.echo(wh.schema_prompt())
 
 

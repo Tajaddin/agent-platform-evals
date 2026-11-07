@@ -63,10 +63,13 @@ def test_fake_planner_cannot_repair(golden: dict[str, GoldenEntry]) -> None:
 def test_fake_planner_synthesize_and_verify(golden: dict[str, GoldenEntry]) -> None:
     p = FakePlanner(golden=golden)
     res = QueryResult(columns=["stations"], rows=[[2338]], row_count=1, truncated=False, elapsed_ms=1.0)
-    text = "".join(p.synthesize("q", "sql", res, [], []))
+    tokens: list[str] = []
+    text, usage = p.synthesize("q", "sql", res, [], [], tokens.append)
     assert "stations=2338" in text and "1 row returned" in text
+    assert "".join(tokens).strip() == text and len(tokens) > 1
+    assert usage.llm_calls == 1
     empty = QueryResult(columns=["x"], rows=[], row_count=0, truncated=False, elapsed_ms=0.5)
-    assert "no rows" in "".join(p.synthesize("q", "sql", empty, [], []))
+    assert "no rows" in p.synthesize("q", "sql", empty, [], [], tokens.append)[0]
     v, usage = p.verify("q", text, res)
     assert v.supported and usage.llm_calls == 1
 
@@ -93,12 +96,34 @@ def test_langchain_planner_cost_and_usage_parsing(settings: Settings) -> None:
 
     planner = LangChainPlanner.__new__(LangChainPlanner)
     planner.settings = settings.model_copy(update={"price_input_per_mtok": 1.0, "price_output_per_mtok": 5.0})
-    planner._usage = Usage()
     usage = planner._usage_from(Msg())
     assert usage.input_tokens == 1_000_000 and usage.output_tokens == 200_000
     assert usage.cost_usd == pytest.approx(2.0)
-    assert planner.last_usage() == usage
     assert planner._usage_from(object()).llm_calls == 1  # no metadata: counted, zero tokens
+
+
+def test_langchain_synthesize_streams_and_returns_its_own_usage(settings: Settings) -> None:
+    class Chunk:
+        def __init__(self, content: object, meta: dict[str, int] | None) -> None:
+            self.content, self.usage_metadata = content, meta
+
+    class Model:
+        def stream(self, messages: object) -> list[Chunk]:
+            # Anthropic reports input tokens on the first event and output tokens on the last.
+            return [
+                Chunk("There are ", {"input_tokens": 300, "output_tokens": 1}),
+                Chunk([{"type": "text", "text": "2338"}], None),
+                Chunk(" stations.", {"input_tokens": 0, "output_tokens": 12}),
+            ]
+
+    planner = LangChainPlanner.__new__(LangChainPlanner)
+    planner.settings = settings.model_copy(update={"price_input_per_mtok": 1.0, "price_output_per_mtok": 5.0})
+    planner.llm = Model()
+    res = QueryResult(columns=["stations"], rows=[[2338]], row_count=1, truncated=False, elapsed_ms=1.0)
+    tokens: list[str] = []
+    text, usage = planner.synthesize("q", "sql", res, [], [], tokens.append)
+    assert text == "There are 2338 stations." and tokens == ["There are ", "2338", " stations."]
+    assert usage == Usage(input_tokens=300, output_tokens=12, llm_calls=1, cost_usd=0.00036)
 
 
 def test_transient_detection() -> None:
